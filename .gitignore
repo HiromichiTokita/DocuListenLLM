@@ -1,0 +1,10 @@
+engine/
+dist/
+build/
+__pycache__/
+*.zip
+out.txt
+err.txt
+settings.json
+.venv/
+*.pyc
