@@ -74,3 +74,66 @@ def test_synthesize_irodori_error_status_raises():
     with pytest.raises(IrodoriSynthError) as ei:
         synthesize_irodori(sess, "http://127.0.0.1:8770", "a", "b")
     assert "loading" in str(ei.value)
+
+
+from irodori_engine import IrodoriServerManager, IrodoriLaunchError
+import os
+
+
+class _HealthResp:
+    def __init__(self, status, ready):
+        self.status_code = status
+        self._ready = ready
+    def json(self):
+        return {"status": "ok" if self._ready else "loading", "ready": self._ready}
+
+
+class _HealthSession:
+    """get() が seq の応答を順に返す。尽きたら最後を繰り返す。"""
+    def __init__(self, seq):
+        self._seq = list(seq)
+    def get(self, url, timeout=None):
+        return self._seq[0] if len(self._seq) == 1 else self._seq.pop(0)
+
+
+def test_base_url_and_python_path(tmp_path):
+    m = IrodoriServerManager(str(tmp_path), port=8770)
+    assert m.base_url == "http://127.0.0.1:8770"
+    assert m.python_path == os.path.join(str(tmp_path), "python.exe")
+
+
+def test_reuse_when_already_healthy(tmp_path):
+    spawned = []
+    m = IrodoriServerManager(
+        str(tmp_path), port=8770,
+        session_factory=lambda: _HealthSession([_HealthResp(200, True)]),
+        spawn=lambda *a, **k: spawned.append(a) or object(),
+    )
+    assert m.ensure_running() is True
+    assert spawned == []
+    assert m._spawned is False
+
+
+def test_missing_runtime_path_raises():
+    m = IrodoriServerManager("E:/no/such/dir", port=8770,
+                             session_factory=lambda: _HealthSession([_HealthResp(503, False)]))
+    with pytest.raises(IrodoriLaunchError):
+        m.ensure_running()
+
+
+def test_spawns_then_polls_until_ready(tmp_path):
+    (tmp_path / "python.exe").write_text("")
+    proc = type("P", (), {"terminated": False,
+                          "terminate": lambda self: setattr(self, "terminated", True),
+                          "poll": lambda self: None})()
+    seq = [_HealthResp(503, False), _HealthResp(503, False), _HealthResp(200, True)]
+    m = IrodoriServerManager(
+        str(tmp_path), port=8770,
+        session_factory=lambda: _HealthSession(seq),
+        spawn=lambda *a, **k: proc,
+        sleep=lambda s: None,
+    )
+    assert m.ensure_running(ready_timeout=10) is True
+    assert m._spawned is True
+    m.stop()
+    assert proc.terminated is True
