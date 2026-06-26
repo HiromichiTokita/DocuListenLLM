@@ -19,6 +19,8 @@ import requests
 import sounddevice as sd
 import soundfile as sf
 
+import irodori_engine
+
 try:
     from docx import Document as DocxDocument
     _DOCX_AVAILABLE = True
@@ -455,6 +457,16 @@ class VoicevoxTTSApp(ctk.CTk):
         self._archetype_menus: list[ctk.CTkOptionMenu] = []
 
         self._settings: dict = self._load_settings()
+        # Irodori エンジン関連の既定値（後方互換: 既存設定を壊さず不足分のみ補完）
+        _s = self._settings
+        _s.setdefault("tts_engine", "voicevox")
+        _s.setdefault("irodori_runtime_path", r"E:\project\IrodoriVDServer\irodori-vd-runtime")
+        _s.setdefault("irodori_port", 8770)
+        _s.setdefault("irodori_checkpoint", r"E:\project\DocuListenLLM\IrodoriTTS\model.safetensors")
+        _s.setdefault("narrator_caption", irodori_engine.DEFAULT_NARRATOR_CAPTION)
+        _caps = _s.setdefault("captions", {})
+        for _cat, _cap in irodori_engine.DEFAULT_CAPTIONS.items():
+            _caps.setdefault(_cat, _cap)
         self._recent_files: list[str] = self._settings.get("recent_files", [])
         _saved_port = self._settings.get("voicevox_port", VOICEVOX_PORT)
         global VOICEVOX_URL
@@ -529,6 +541,12 @@ class VoicevoxTTSApp(ctk.CTk):
                 for r in getattr(self, "char_rows", [])
                 if r["name_var"].get().strip()
             ],
+            "tts_engine":           self.engine_var.get() if hasattr(self, "engine_var") else self._settings.get("tts_engine", "voicevox"),
+            "irodori_runtime_path": self._settings.get("irodori_runtime_path", ""),
+            "irodori_port":         self._settings.get("irodori_port", 8770),
+            "irodori_checkpoint":   self._settings.get("irodori_checkpoint", ""),
+            "narrator_caption":     self.narrator_caption_var.get() if hasattr(self, "narrator_caption_var") else self._settings.get("narrator_caption", ""),
+            "captions":             {cat: var.get() for cat, var in self.caption_vars.items()} if hasattr(self, "caption_vars") else self._settings.get("captions", {}),
         }
         try:
             with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
@@ -585,7 +603,16 @@ class VoicevoxTTSApp(ctk.CTk):
         self._engine_proc = None
 
     def _on_close(self) -> None:
+        try:
+            self._save_settings()
+        except Exception:
+            pass
         self._terminate_engine()
+        if hasattr(self, "_irodori") and self._irodori is not None:
+            try:
+                self._irodori.stop()
+            except Exception:
+                pass
         self.destroy()
 
     # ─── CPUリソース管理 ─────────────────────
@@ -843,11 +870,33 @@ class VoicevoxTTSApp(ctk.CTk):
             onvalue=True, offvalue=False)
         self.ruby_kana_check.pack(side="left", padx=(16, 0))
 
+        ctk.CTkLabel(frame, text="エンジン:", width=60, anchor="e").pack(
+            side="left", padx=(16, 2))
+        self.engine_var = ctk.StringVar(value=self._settings.get("tts_engine", "voicevox"))
+        ctk.CTkOptionMenu(
+            frame, values=["voicevox", "irodori"], variable=self.engine_var, width=110,
+            command=lambda _v: self._on_engine_changed()).pack(side="left", padx=(0, 6))
+        self.irodori_status_label = ctk.CTkLabel(
+            frame, text="", font=ctk.CTkFont(size=11), text_color="gray60")
+        self.irodori_status_label.pack(side="left")
+
         ctk.CTkButton(
             frame, text="🖥 ログ", width=80,
             fg_color="gray30", hover_color="gray20",
             command=self._open_log_window,
         ).pack(side="right")
+
+        self._on_engine_changed()  # 初期状態ラベルを反映
+
+    def _on_engine_changed(self) -> None:
+        """エンジン切替時: 設定更新と状態ラベル表示（実際の起動は再生時=Task6）。"""
+        eng = self.engine_var.get()
+        self._settings["tts_engine"] = eng
+        if eng == "irodori":
+            self.irodori_status_label.configure(text="Irodori: 未起動")
+        else:
+            self.irodori_status_label.configure(text="")
+        self._save_settings()
 
     def _build_text_frame(self) -> None:
         frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -987,6 +1036,7 @@ class VoicevoxTTSApp(ctk.CTk):
         char_list = list(self._speaker_data.keys())
         saved_archetypes: dict = self._settings.get("archetypes", {})
         self._archetype_menus = []
+        self.caption_vars: dict[str, ctk.StringVar] = {}
 
         for row_idx, archetype in enumerate(ARCHETYPES):
             saved = saved_archetypes.get(archetype, {})
@@ -1020,6 +1070,15 @@ class VoicevoxTTSApp(ctk.CTk):
                     self._save_settings(),
                 ))
 
+            # Irodori 用キャプション欄（VOICEVOX話者選択と共存）
+            cap_init = self._settings.get("captions", {}).get(
+                archetype, irodori_engine.DEFAULT_CAPTIONS.get(archetype, ""))
+            cap_var = ctk.StringVar(value=cap_init)
+            ctk.CTkEntry(scroll, textvariable=cap_var, width=320,
+                         placeholder_text="Irodori キャプション").grid(
+                row=row_idx, column=3, padx=(8, 0), pady=2, sticky="we")
+            self.caption_vars[archetype] = cap_var
+
             self.archetype_vars[archetype] = {
                 "char":       char_var,
                 "style":      style_var,
@@ -1027,6 +1086,16 @@ class VoicevoxTTSApp(ctk.CTk):
                 "style_menu": style_menu,
             }
             self._archetype_menus.extend([char_menu, style_menu])
+
+        # ナレーター（地の文）用 Irodori キャプション
+        _nar_row = len(ARCHETYPES)
+        ctk.CTkLabel(scroll, text="ナレーター:", width=80, anchor="e").grid(
+            row=_nar_row, column=0, padx=(0, 4), pady=2, sticky="e")
+        self.narrator_caption_var = ctk.StringVar(
+            value=self._settings.get("narrator_caption", irodori_engine.DEFAULT_NARRATOR_CAPTION))
+        ctk.CTkEntry(scroll, textvariable=self.narrator_caption_var, width=320,
+                     placeholder_text="ナレーター キャプション").grid(
+            row=_nar_row, column=1, columnspan=3, padx=(0, 0), pady=2, sticky="we")
 
         # ── キャラクター辞書 タブ ──
         dict_tab = inner_tabs.tab("キャラクター辞書")
@@ -2343,6 +2412,7 @@ class VoicevoxTTSApp(ctk.CTk):
                         style_id = self._get_speaker_id(c_name, s_name, fallback=2)
 
                     self._script[i]["style_id"] = style_id
+                    self._script[i]["category"] = category
                     cast_count += 1
                     if DEBUG: print(f"[DEBUG] Chunk {i}: Cat='{category}', ID={style_id}")
 
