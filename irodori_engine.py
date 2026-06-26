@@ -36,3 +36,26 @@ def resolve_caption(category: str, caption_map: dict, narrator_caption: str) -> 
     if user_val:
         return user_val
     return DEFAULT_CAPTIONS.get(cat, narrator_caption)
+
+
+class IrodoriSynthError(Exception):
+    pass
+
+
+def synthesize_irodori(session, base_url: str, text: str, caption: str,
+                       seed=None, timeout: int = 180) -> bytes:
+    """Irodori サーバの /synthesize を叩き WAV バイト列を返す。
+
+    session は requests.Session 互換（.post(url, json=, timeout=) -> resp）。
+    """
+    payload = {"text": text, "caption": caption}
+    if seed is not None:
+        payload["seed"] = int(seed)
+    resp = session.post(f"{base_url}/synthesize", json=payload, timeout=timeout)
+    if resp.status_code != 200:
+        try:
+            msg = resp.json().get("error", f"HTTP {resp.status_code}")
+        except Exception:
+            msg = f"HTTP {resp.status_code}"
+        raise IrodoriSynthError(str(msg))
+    return resp.content
