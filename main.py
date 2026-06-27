@@ -189,6 +189,26 @@ def _time_stretch(audio: np.ndarray, sample_rate: int, speed: float) -> np.ndarr
     stretched = pedalboard.time_stretch(buf, sample_rate, stretch_factor=speed)
     return stretched[0] if was_1d else stretched.T
 
+
+# 再生はこのサンプルレートに統一する（VOICEVOXの24kHzは実績あり。
+# Irodoriの48kHzは一部環境で sd.play が再生されないため、ここへリサンプルして同じ経路に載せる）
+PLAYBACK_SR = 24000
+
+
+def _resample_linear(audio: np.ndarray, sr_from: int, sr_to: int) -> np.ndarray:
+    """numpy 線形補間によるリサンプル（依存追加なし）。speech 用途には十分。"""
+    if sr_from == sr_to or sr_from <= 0 or sr_to <= 0 or audio.shape[0] == 0:
+        return audio
+    n_to = int(round(audio.shape[0] * sr_to / sr_from))
+    if n_to <= 0:
+        return audio
+    x_old = np.linspace(0.0, 1.0, audio.shape[0], endpoint=False)
+    x_new = np.linspace(0.0, 1.0, n_to, endpoint=False)
+    if audio.ndim == 1:
+        return np.interp(x_new, x_old, audio).astype(np.float32)
+    chans = [np.interp(x_new, x_old, audio[:, c]) for c in range(audio.shape[1])]
+    return np.stack(chans, axis=1).astype(np.float32)
+
 def _best_style(styles: dict[str, int]) -> str:
     if "ノーマル" in styles:
         return "ノーマル"
@@ -2795,6 +2815,12 @@ class VoicevoxTTSApp(ctk.CTk):
 
                 if audio_data is None:
                     break
+
+                # 再生レートを統一（Irodoriの48kHz等は一部環境で sd.play が詰まるため24kHzへ）。
+                # VOICEVOXの24kHzはそのまま。speech/感情表現は24kHzで実質劣化なし。
+                if sample_rate != PLAYBACK_SR:
+                    audio_data = _resample_linear(audio_data, sample_rate, PLAYBACK_SR)
+                    sample_rate = PLAYBACK_SR
 
                 speed = round(self.speed_slider.get(), 1)
                 audio_processed = _time_stretch(audio_data, sample_rate, speed)
