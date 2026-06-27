@@ -906,7 +906,7 @@ class VoicevoxTTSApp(ctk.CTk):
             side="left", padx=(16, 2))
         self.engine_var = ctk.StringVar(value=self._settings.get("tts_engine", "voicevox"))
         ctk.CTkOptionMenu(
-            frame, values=["voicevox", "irodori"], variable=self.engine_var, width=110,
+            frame, values=["voicevox", "irodori", "mixed"], variable=self.engine_var, width=110,
             command=lambda _v: self._on_engine_changed()).pack(side="left", padx=(0, 6))
         self.irodori_status_label = ctk.CTkLabel(
             frame, text="", font=ctk.CTkFont(size=11), text_color="gray60")
@@ -941,6 +941,11 @@ class VoicevoxTTSApp(ctk.CTk):
         self._save_settings()
         label = "ナレーター" if category == "__narrator__" else category
         self._set_status(f"{label} の声をリロールしました（次の再生で反映）", "ok")
+
+    def _set_category_engine(self, category: str, engine: str) -> None:
+        """カテゴリ毎の使用エンジン（mixed時に有効）を更新・保存。"""
+        self._category_engines[category] = engine
+        self._save_settings()
 
     def _build_text_frame(self) -> None:
         frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -1127,6 +1132,12 @@ class VoicevoxTTSApp(ctk.CTk):
                 ctk.CTkButton(scroll, text="🎲", width=32,
                               command=lambda c=archetype: self._reroll_voice(c)).grid(
                     row=row_idx, column=4, padx=(4, 0), pady=2)
+                _eng_var = ctk.StringVar(
+                    value=self._category_engines.get(archetype, "voicevox"))
+                ctk.CTkOptionMenu(
+                    scroll, values=["voicevox", "irodori"], variable=_eng_var, width=92,
+                    command=lambda v, c=archetype: self._set_category_engine(c, v)).grid(
+                    row=row_idx, column=5, padx=(4, 0), pady=2)
 
             self.archetype_vars[archetype] = {
                 "char":       char_var,
@@ -1148,6 +1159,12 @@ class VoicevoxTTSApp(ctk.CTk):
         ctk.CTkButton(scroll, text="🎲", width=32,
                       command=lambda: self._reroll_voice("__narrator__")).grid(
             row=_nar_row, column=4, padx=(4, 0), pady=2)
+        _nar_eng_var = ctk.StringVar(
+            value=self._category_engines.get("__narrator__", "voicevox"))
+        ctk.CTkOptionMenu(
+            scroll, values=["voicevox", "irodori"], variable=_nar_eng_var, width=92,
+            command=lambda v: self._set_category_engine("__narrator__", v)).grid(
+            row=_nar_row, column=5, padx=(4, 0), pady=2)
 
         # ── キャラクター辞書 タブ ──
         dict_tab = inner_tabs.tab("キャラクター辞書")
