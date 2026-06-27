@@ -198,3 +198,17 @@ def test_new_seed_range():
     for _ in range(20):
         s = new_seed()
         assert 0 <= s < 2**31
+
+
+def test_engine_for_global_overrides():
+    from irodori_engine import engine_for
+    assert engine_for("主人公 男", "voicevox", {"主人公 男": "irodori"}) == "voicevox"
+    assert engine_for("主人公 男", "irodori", {}) == "irodori"
+
+
+def test_engine_for_mixed_uses_category_map():
+    from irodori_engine import engine_for
+    ce = {"主人公 男": "irodori", "__narrator__": "voicevox"}
+    assert engine_for("主人公 男", "mixed", ce) == "irodori"
+    assert engine_for("ナレーション", "mixed", ce) == "voicevox"
+    assert engine_for("中年 女", "mixed", ce) == "voicevox"

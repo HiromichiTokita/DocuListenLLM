@@ -185,3 +185,17 @@ def voice_seed_for(category: str, seeds: dict, narrator_key: str = _NARRATION_SE
 
 def new_seed() -> int:
     return _random.randrange(0, 2 ** 31)
+
+
+def engine_for(category: str, global_engine: str, category_engines: dict) -> str:
+    """チャンクのカテゴリと global 設定から使用エンジンを決める。
+
+    global が "voicevox"/"irodori" ならそれを全採用。"mixed" のときだけ
+    category_engines（地の文系は "__narrator__" キー）を引く。既定 "voicevox"。
+    """
+    if global_engine in ("voicevox", "irodori"):
+        return global_engine
+    cat = (category or "").strip()
+    key = _NARRATION_SEED_KEY if (cat in _NARRATION_CATEGORIES or cat not in DEFAULT_CAPTIONS) else cat
+    val = (category_engines or {}).get(key, "voicevox")
+    return "irodori" if val == "irodori" else "voicevox"
