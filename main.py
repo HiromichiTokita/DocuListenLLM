@@ -467,6 +467,10 @@ class VoicevoxTTSApp(ctk.CTk):
         _caps = _s.setdefault("captions", {})
         for _cat, _cap in irodori_engine.DEFAULT_CAPTIONS.items():
             _caps.setdefault(_cat, _cap)
+        self._irodori = irodori_engine.IrodoriServerManager(
+            runtime_path=_s.get("irodori_runtime_path", ""),
+            port=int(_s.get("irodori_port", 8770)),
+            checkpoint=_s.get("irodori_checkpoint", ""))
         self._recent_files: list[str] = self._settings.get("recent_files", [])
         _saved_port = self._settings.get("voicevox_port", VOICEVOX_PORT)
         global VOICEVOX_URL
@@ -2569,6 +2573,30 @@ class VoicevoxTTSApp(ctk.CTk):
     ) -> None:
         assert self._audio_queue is not None
         try:
+            # エンジン/キャプションは開始時に一度だけスナップショット（スレッド安全・セッション内固定）
+            _engine = self.engine_var.get() if hasattr(self, "engine_var") else "voicevox"
+            _caption_map = ({c: v.get() for c, v in self.caption_vars.items()}
+                            if hasattr(self, "caption_vars") else {})
+            _narr_caption = (self.narrator_caption_var.get()
+                             if hasattr(self, "narrator_caption_var") else "")
+            # Irodori エンジン時はバンドルを遅延起動し ready を待つ（UIを固めぬよう producer スレッドで実行）
+            if _engine == "irodori":
+                try:
+                    ok = self._irodori.ensure_running(
+                        on_status=lambda m, k="working": self.after(
+                            0, lambda mm=m, kk=k: self._set_status(mm, kk)))
+                except irodori_engine.IrodoriLaunchError as exc:
+                    self.after(0, lambda e=str(exc): self._set_status(e, "error"))
+                    self._stop_event.set()
+                    self._audio_queue.put(None)
+                    return
+                if not ok or self._stop_event.is_set() or gen != self._play_generation:
+                    if not ok:
+                        self.after(0, lambda: self._set_status("Irodori 起動に失敗しました", "error"))
+                        self._stop_event.set()
+                    self._audio_queue.put(None)
+                    return
+
             if self._script:
                 total = len(self._script)
 
@@ -2630,37 +2658,49 @@ class VoicevoxTTSApp(ctk.CTk):
                     chunk += "。"
 
                 try:
-                    self.after(0, lambda i=index, t=total: self._set_status(
-                        f"音声クエリを送信中... ({i}/{t})", "working"))
-                    query_resp = self._http_session.post(
-                        f"{VOICEVOX_URL}/audio_query",
-                        params={"text": chunk, "speaker": speaker_id},
-                        timeout=30,
-                    )
-                    query_resp.raise_for_status()
-                    audio_query = query_resp.json()
-                    del query_resp
-                    audio_query["postPhonemeLength"] = (
-                        audio_query.get("postPhonemeLength", 0.0) + 0.15
-                    )
+                    if _engine == "irodori":
+                        # カテゴリ→キャプション→Irodori /synthesize
+                        if self._script and chunk_idx < len(self._script):
+                            cat = self._script[chunk_idx].get("category", "ナレーション")
+                        else:
+                            cat = "ナレーション"
+                        caption = irodori_engine.resolve_caption(
+                            cat, _caption_map, _narr_caption)
+                        self.after(0, lambda i=index, t=total: self._set_status(
+                            f"Irodori 合成中... ({i}/{t})", "working"))
+                        wav_bytes = irodori_engine.synthesize_irodori(
+                            self._http_session, self._irodori.base_url, chunk, caption)
+                    else:
+                        self.after(0, lambda i=index, t=total: self._set_status(
+                            f"音声クエリを送信中... ({i}/{t})", "working"))
+                        query_resp = self._http_session.post(
+                            f"{VOICEVOX_URL}/audio_query",
+                            params={"text": chunk, "speaker": speaker_id},
+                            timeout=30,
+                        )
+                        query_resp.raise_for_status()
+                        audio_query = query_resp.json()
+                        del query_resp
+                        audio_query["postPhonemeLength"] = (
+                            audio_query.get("postPhonemeLength", 0.0) + 0.15
+                        )
 
-                    self.after(0, lambda i=index, t=total: self._set_status(
-                        f"WAVデータを合成中... ({i}/{t})", "working"))
-                    synthesis_resp = self._http_session.post(
-                        f"{VOICEVOX_URL}/synthesis",
-                        params={"speaker": speaker_id},
-                        json=audio_query,
-                        timeout=60,
-                    )
-                    synthesis_resp.raise_for_status()
-                    del audio_query
+                        self.after(0, lambda i=index, t=total: self._set_status(
+                            f"WAVデータを合成中... ({i}/{t})", "working"))
+                        synthesis_resp = self._http_session.post(
+                            f"{VOICEVOX_URL}/synthesis",
+                            params={"speaker": speaker_id},
+                            json=audio_query,
+                            timeout=60,
+                        )
+                        synthesis_resp.raise_for_status()
+                        del audio_query
+                        wav_bytes = synthesis_resp.content
+                        del synthesis_resp
 
                     if gen != self._play_generation:
                         self._slot_semaphore.release()
                         break
-
-                    wav_bytes = synthesis_resp.content
-                    del synthesis_resp
 
                     write_ok = False
                     for _attempt in range(5):
