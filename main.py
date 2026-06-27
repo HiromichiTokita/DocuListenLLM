@@ -489,7 +489,9 @@ class VoicevoxTTSApp(ctk.CTk):
             _caps.setdefault(_cat, _cap)
         _s.setdefault("irodori_use_ref", True)
         _s.setdefault("caption_seeds", {})
+        _s.setdefault("category_engines", {})
         self._caption_seeds: dict[str, int] = dict(_s.get("caption_seeds", {}))
+        self._category_engines: dict[str, str] = dict(_s.get("category_engines", {}))
         self._irodori = irodori_engine.IrodoriServerManager(
             runtime_path=_s.get("irodori_runtime_path", ""),
             port=int(_s.get("irodori_port", 8770)),
@@ -576,6 +578,7 @@ class VoicevoxTTSApp(ctk.CTk):
             "captions":             {cat: var.get() for cat, var in self.caption_vars.items()} if hasattr(self, "caption_vars") else self._settings.get("captions", {}),
             "irodori_use_ref":      self.use_ref_var.get() if hasattr(self, "use_ref_var") else self._settings.get("irodori_use_ref", True),
             "caption_seeds":        {c: int(v) for c, v in self._caption_seeds.items()} if hasattr(self, "_caption_seeds") else self._settings.get("caption_seeds", {}),
+            "category_engines":     dict(self._category_engines) if hasattr(self, "_category_engines") else self._settings.get("category_engines", {}),
         }
         try:
             with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
@@ -2625,8 +2628,14 @@ class VoicevoxTTSApp(ctk.CTk):
             _use_ref = (self.use_ref_var.get() if hasattr(self, "use_ref_var")
                         else self._settings.get("irodori_use_ref", True))
             _seeds = dict(self._caption_seeds)
-            # Irodori エンジン時はバンドルを遅延起動し ready を待つ（UIを固めぬよう producer スレッドで実行）
-            if _engine == "irodori":
+            _global_engine = _engine  # "voicevox" / "irodori" / "mixed"
+            _cat_engines = dict(self._category_engines)
+            # Irodori を1チャンクでも使うならバンドルを遅延起動（mixed 含む）
+            _needs_irodori = (_global_engine == "irodori"
+                              or (_global_engine == "mixed"
+                                  and any(v == "irodori" for v in _cat_engines.values())))
+            # Irodori 起動はUIを固めぬよう producer スレッドで実行
+            if _needs_irodori:
                 try:
                     ok = self._irodori.ensure_running(
                         on_status=lambda m, k="working": self.after(
@@ -2704,12 +2713,13 @@ class VoicevoxTTSApp(ctk.CTk):
                     chunk += "。"
 
                 try:
-                    if _engine == "irodori":
-                        # カテゴリ→キャプション→Irodori /synthesize
-                        if self._script and chunk_idx < len(self._script):
-                            cat = self._script[chunk_idx].get("category", "ナレーション")
-                        else:
-                            cat = "ナレーション"
+                    # チャンクのカテゴリ → 使用エンジン（global=mixed のときカテゴリ別）
+                    if self._script and chunk_idx < len(self._script):
+                        cat = self._script[chunk_idx].get("category", "ナレーション")
+                    else:
+                        cat = "ナレーション"
+                    _chunk_engine = irodori_engine.engine_for(cat, _global_engine, _cat_engines)
+                    if _chunk_engine == "irodori":
                         caption = irodori_engine.resolve_caption(
                             cat, _caption_map, _narr_caption)
                         seed = irodori_engine.voice_seed_for(cat, _seeds)
