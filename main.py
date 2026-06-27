@@ -487,6 +487,9 @@ class VoicevoxTTSApp(ctk.CTk):
         _caps = _s.setdefault("captions", {})
         for _cat, _cap in irodori_engine.DEFAULT_CAPTIONS.items():
             _caps.setdefault(_cat, _cap)
+        _s.setdefault("irodori_use_ref", True)
+        _s.setdefault("caption_seeds", {})
+        self._caption_seeds: dict[str, int] = dict(_s.get("caption_seeds", {}))
         self._irodori = irodori_engine.IrodoriServerManager(
             runtime_path=_s.get("irodori_runtime_path", ""),
             port=int(_s.get("irodori_port", 8770)),
@@ -571,6 +574,8 @@ class VoicevoxTTSApp(ctk.CTk):
             "irodori_checkpoint":   self._settings.get("irodori_checkpoint", ""),
             "narrator_caption":     self.narrator_caption_var.get() if hasattr(self, "narrator_caption_var") else self._settings.get("narrator_caption", ""),
             "captions":             {cat: var.get() for cat, var in self.caption_vars.items()} if hasattr(self, "caption_vars") else self._settings.get("captions", {}),
+            "irodori_use_ref":      self.use_ref_var.get() if hasattr(self, "use_ref_var") else self._settings.get("irodori_use_ref", True),
+            "caption_seeds":        {c: int(v) for c, v in self._caption_seeds.items()} if hasattr(self, "_caption_seeds") else self._settings.get("caption_seeds", {}),
         }
         try:
             with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
@@ -904,6 +909,11 @@ class VoicevoxTTSApp(ctk.CTk):
             frame, text="", font=ctk.CTkFont(size=11), text_color="gray60")
         self.irodori_status_label.pack(side="left")
 
+        self.use_ref_var = ctk.BooleanVar(value=self._settings.get("irodori_use_ref", True))
+        ctk.CTkCheckBox(frame, text="声を固定", variable=self.use_ref_var,
+                        onvalue=True, offvalue=False,
+                        command=self._save_settings).pack(side="left", padx=(8, 0))
+
         ctk.CTkButton(
             frame, text="🖥 ログ", width=80,
             fg_color="gray30", hover_color="gray20",
@@ -913,7 +923,7 @@ class VoicevoxTTSApp(ctk.CTk):
         self._on_engine_changed()  # 初期状態ラベルを反映
 
     def _on_engine_changed(self) -> None:
-        """エンジン切替時: 設定更新と状態ラベル表示（実際の起動は再生時=Task6）。"""
+        """エンジン切替時: 設定更新と状態ラベル表示（実際の起動は再生時）。"""
         eng = self.engine_var.get()
         self._settings["tts_engine"] = eng
         if eng == "irodori":
@@ -921,6 +931,13 @@ class VoicevoxTTSApp(ctk.CTk):
         else:
             self.irodori_status_label.configure(text="")
         self._save_settings()
+
+    def _reroll_voice(self, category: str) -> None:
+        """カテゴリの声をリロール（seed変更）。次の再生で新しい基準音声になる。"""
+        self._caption_seeds[category] = irodori_engine.new_seed()
+        self._save_settings()
+        label = "ナレーター" if category == "__narrator__" else category
+        self._set_status(f"{label} の声をリロールしました（次の再生で反映）", "ok")
 
     def _build_text_frame(self) -> None:
         frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -1104,6 +1121,9 @@ class VoicevoxTTSApp(ctk.CTk):
                              placeholder_text="Irodori キャプション").grid(
                     row=row_idx, column=3, padx=(8, 0), pady=2, sticky="we")
                 self.caption_vars[archetype] = cap_var
+                ctk.CTkButton(scroll, text="🎲", width=32,
+                              command=lambda c=archetype: self._reroll_voice(c)).grid(
+                    row=row_idx, column=4, padx=(4, 0), pady=2)
 
             self.archetype_vars[archetype] = {
                 "char":       char_var,
@@ -1122,6 +1142,9 @@ class VoicevoxTTSApp(ctk.CTk):
         ctk.CTkEntry(scroll, textvariable=self.narrator_caption_var, width=320,
                      placeholder_text="ナレーター キャプション").grid(
             row=_nar_row, column=1, columnspan=3, padx=(0, 0), pady=2, sticky="we")
+        ctk.CTkButton(scroll, text="🎲", width=32,
+                      command=lambda: self._reroll_voice("__narrator__")).grid(
+            row=_nar_row, column=4, padx=(4, 0), pady=2)
 
         # ── キャラクター辞書 タブ ──
         dict_tab = inner_tabs.tab("キャラクター辞書")
@@ -2599,6 +2622,9 @@ class VoicevoxTTSApp(ctk.CTk):
                             if hasattr(self, "caption_vars") else {})
             _narr_caption = (self.narrator_caption_var.get()
                              if hasattr(self, "narrator_caption_var") else "")
+            _use_ref = (self.use_ref_var.get() if hasattr(self, "use_ref_var")
+                        else self._settings.get("irodori_use_ref", True))
+            _seeds = dict(self._caption_seeds)
             # Irodori エンジン時はバンドルを遅延起動し ready を待つ（UIを固めぬよう producer スレッドで実行）
             if _engine == "irodori":
                 try:
@@ -2686,12 +2712,13 @@ class VoicevoxTTSApp(ctk.CTk):
                             cat = "ナレーション"
                         caption = irodori_engine.resolve_caption(
                             cat, _caption_map, _narr_caption)
+                        seed = irodori_engine.voice_seed_for(cat, _seeds)
                         self.after(0, lambda i=index, t=total: self._set_status(
                             f"Irodori 合成中... ({i}/{t})", "working"))
-                        # 同一キャプション→同一seed→同一の声（声が1文ごとに変わるのを防ぐ）
+                        # カテゴリ毎seed＋use_ref（声固定）で同カテゴリの声を一貫させる
                         wav_bytes = irodori_engine.synthesize_irodori(
                             self._http_session, self._irodori.base_url, chunk, caption,
-                            seed=irodori_engine.caption_seed(caption))
+                            seed=seed, use_ref=_use_ref)
                     else:
                         self.after(0, lambda i=index, t=total: self._set_status(
                             f"音声クエリを送信中... ({i}/{t})", "working"))
