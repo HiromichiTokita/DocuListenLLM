@@ -167,3 +167,34 @@ def test_caption_seed_stable_and_distinct():
     assert caption_seed("落ち着いた女性の声で読み上げてください。") == a  # 同一→同一
     assert caption_seed("低い男性の声で読み上げてください。") != a        # 異なる→異なる
     assert caption_seed("") == caption_seed("")                          # 空でも安定
+
+
+def test_synthesize_irodori_includes_use_ref_when_true():
+    sess = _Session(_Resp(200, content=b"x"))
+    synthesize_irodori(sess, "http://h", "a", "b", seed=3, use_ref=True)
+    assert sess.calls[0]["json"]["use_ref"] is True
+
+
+def test_synthesize_irodori_omits_use_ref_when_false():
+    sess = _Session(_Resp(200, content=b"x"))
+    synthesize_irodori(sess, "http://h", "a", "b")
+    assert "use_ref" not in sess.calls[0]["json"]
+
+
+def test_voice_seed_for_uses_category_seed_by_default():
+    from irodori_engine import voice_seed_for, caption_seed
+    assert voice_seed_for("主人公 男", {}) == caption_seed("主人公 男")
+
+
+def test_voice_seed_for_uses_override_and_narrator():
+    from irodori_engine import voice_seed_for
+    seeds = {"主人公 男": 42, "__narrator__": 7}
+    assert voice_seed_for("主人公 男", seeds) == 42
+    assert voice_seed_for("ナレーション", seeds) == 7
+
+
+def test_new_seed_range():
+    from irodori_engine import new_seed
+    for _ in range(20):
+        s = new_seed()
+        assert 0 <= s < 2**31

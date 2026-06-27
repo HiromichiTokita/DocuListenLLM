@@ -54,7 +54,7 @@ class IrodoriSynthError(Exception):
 
 
 def synthesize_irodori(session, base_url: str, text: str, caption: str,
-                       seed=None, timeout: int = 180) -> bytes:
+                       seed=None, use_ref: bool = False, timeout: int = 180) -> bytes:
     """Irodori サーバの /synthesize を叩き WAV バイト列を返す。
 
     session は requests.Session 互換（.post(url, json=, timeout=) -> resp）。
@@ -62,6 +62,8 @@ def synthesize_irodori(session, base_url: str, text: str, caption: str,
     payload = {"text": text, "caption": caption}
     if seed is not None:
         payload["seed"] = int(seed)
+    if use_ref:
+        payload["use_ref"] = True
     resp = session.post(f"{base_url}/synthesize", json=payload, timeout=timeout)
     if resp.status_code != 200:
         try:
@@ -162,3 +164,24 @@ class IrodoriServerManager:
                 pass
         self._proc = None
         self._spawned = False
+
+
+import random as _random
+
+_NARRATION_SEED_KEY = "__narrator__"
+
+
+def voice_seed_for(category: str, seeds: dict, narrator_key: str = _NARRATION_SEED_KEY) -> int:
+    """カテゴリ毎の声の seed を返す。地の文系/未知カテゴリは narrator の seed。"""
+    cat = (category or "").strip()
+    if cat in _NARRATION_CATEGORIES or cat not in DEFAULT_CAPTIONS:
+        if narrator_key in seeds:
+            return int(seeds[narrator_key])
+        return caption_seed(narrator_key)
+    if cat in seeds:
+        return int(seeds[cat])
+    return caption_seed(cat)
+
+
+def new_seed() -> int:
+    return _random.randrange(0, 2 ** 31)
