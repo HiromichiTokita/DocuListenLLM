@@ -1070,14 +1070,16 @@ class VoicevoxTTSApp(ctk.CTk):
                     self._save_settings(),
                 ))
 
-            # Irodori 用キャプション欄（VOICEVOX話者選択と共存）
-            cap_init = self._settings.get("captions", {}).get(
-                archetype, irodori_engine.DEFAULT_CAPTIONS.get(archetype, ""))
-            cap_var = ctk.StringVar(value=cap_init)
-            ctk.CTkEntry(scroll, textvariable=cap_var, width=320,
-                         placeholder_text="Irodori キャプション").grid(
-                row=row_idx, column=3, padx=(8, 0), pady=2, sticky="we")
-            self.caption_vars[archetype] = cap_var
+            # Irodori 用キャプション欄（VOICEVOX話者選択と共存）。
+            # 「ナレーション」は下部の専用ナレーター欄に一本化するためスキップ。
+            if archetype in irodori_engine.DEFAULT_CAPTIONS:
+                cap_init = self._settings.get("captions", {}).get(
+                    archetype, irodori_engine.DEFAULT_CAPTIONS.get(archetype, ""))
+                cap_var = ctk.StringVar(value=cap_init)
+                ctk.CTkEntry(scroll, textvariable=cap_var, width=320,
+                             placeholder_text="Irodori キャプション").grid(
+                    row=row_idx, column=3, padx=(8, 0), pady=2, sticky="we")
+                self.caption_vars[archetype] = cap_var
 
             self.archetype_vars[archetype] = {
                 "char":       char_var,
