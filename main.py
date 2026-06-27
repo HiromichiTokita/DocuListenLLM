@@ -2688,8 +2688,10 @@ class VoicevoxTTSApp(ctk.CTk):
                             cat, _caption_map, _narr_caption)
                         self.after(0, lambda i=index, t=total: self._set_status(
                             f"Irodori 合成中... ({i}/{t})", "working"))
+                        # 同一キャプション→同一seed→同一の声（声が1文ごとに変わるのを防ぐ）
                         wav_bytes = irodori_engine.synthesize_irodori(
-                            self._http_session, self._irodori.base_url, chunk, caption)
+                            self._http_session, self._irodori.base_url, chunk, caption,
+                            seed=irodori_engine.caption_seed(caption))
                     else:
                         self.after(0, lambda i=index, t=total: self._set_status(
                             f"音声クエリを送信中... ({i}/{t})", "working"))

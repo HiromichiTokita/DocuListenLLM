@@ -38,6 +38,17 @@ def resolve_caption(category: str, caption_map: dict, narrator_caption: str) -> 
     return DEFAULT_CAPTIONS.get(cat, narrator_caption)
 
 
+def caption_seed(caption: str) -> int:
+    """キャプション文字列から安定した seed を生成する。
+
+    Irodori は caption-only だと seed 未固定で毎回ランダムな声になる。
+    同一キャプション→同一 seed→同一の声 にすることで、カテゴリ毎・
+    ナレーション全体で声を一貫させる（プロセスを跨いでも安定）。
+    """
+    import zlib
+    return zlib.crc32((caption or "").encode("utf-8")) & 0x7FFFFFFF
+
+
 class IrodoriSynthError(Exception):
     pass
 

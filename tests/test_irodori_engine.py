@@ -158,3 +158,12 @@ def test_no_double_spawn_when_proc_alive(tmp_path):
     assert len(spawns) == 1                 # 1回目で spawn
     assert m.ensure_running(ready_timeout=0.0) is False
     assert len(spawns) == 1                 # 2回目は生存中なので再 spawn しない
+
+
+def test_caption_seed_stable_and_distinct():
+    from irodori_engine import caption_seed
+    a = caption_seed("落ち着いた女性の声で読み上げてください。")
+    assert isinstance(a, int) and a >= 0
+    assert caption_seed("落ち着いた女性の声で読み上げてください。") == a  # 同一→同一
+    assert caption_seed("低い男性の声で読み上げてください。") != a        # 異なる→異なる
+    assert caption_seed("") == caption_seed("")                          # 空でも安定
