@@ -137,3 +137,24 @@ def test_spawns_then_polls_until_ready(tmp_path):
     assert m._spawned is True
     m.stop()
     assert proc.terminated is True
+
+
+def test_no_double_spawn_when_proc_alive(tmp_path):
+    (tmp_path / "python.exe").write_text("")
+    spawns = []
+
+    class _AliveProc:
+        def terminate(self):
+            pass
+        def poll(self):
+            return None  # 生存中
+
+    m = IrodoriServerManager(
+        str(tmp_path), port=8770,
+        session_factory=lambda: _HealthSession([_HealthResp(503, False)]),
+        spawn=lambda *a, **k: (spawns.append(1), _AliveProc())[1],
+        sleep=lambda s: None)
+    assert m.ensure_running(ready_timeout=0.0) is False
+    assert len(spawns) == 1                 # 1回目で spawn
+    assert m.ensure_running(ready_timeout=0.0) is False
+    assert len(spawns) == 1                 # 2回目は生存中なので再 spawn しない

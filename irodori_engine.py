@@ -64,6 +64,7 @@ def synthesize_irodori(session, base_url: str, text: str, caption: str,
 import os
 import time as _time
 import subprocess
+import threading
 
 
 class IrodoriLaunchError(Exception):
@@ -83,6 +84,7 @@ class IrodoriServerManager:
         self._proc = None
         self._spawned = False
         self._session = None
+        self._lock = threading.Lock()
 
     @staticmethod
     def _default_session_factory():
@@ -113,26 +115,33 @@ class IrodoriServerManager:
         def _status(msg, kind="working"):
             if on_status:
                 on_status(msg, kind)
-        if self.is_healthy():
-            _status("Irodori: 既存サーバに接続", "ok")
-            return True
-        if not os.path.isfile(self.python_path):
-            raise IrodoriLaunchError(
-                f"Irodori ランタイムが見つかりません: {self.python_path}（設定 irodori_runtime_path を確認）")
-        cmd = [self.python_path, "-m", "vd_server", "--port", str(self.port), "--device", self.device]
-        if self.checkpoint:
-            cmd += ["--checkpoint", self.checkpoint]
-        _status("Irodori: サーバ起動中…", "working")
-        self._proc = self._spawn(cmd)
-        self._spawned = True
-        deadline = _time.monotonic() + ready_timeout
-        while _time.monotonic() < deadline:
+        # ロックで直列化（再生を続けて起こしても二重起動しない）
+        with self._lock:
             if self.is_healthy():
-                _status("Irodori: ready", "ok")
+                _status("Irodori: 既存サーバに接続", "ok")
                 return True
-            self._sleep(2.0)
-        _status("Irodori: 起動がタイムアウトしました", "error")
-        return False
+            # 自分が起動済みで生存中なら再 spawn しない（ready 待ちに入る）
+            already_alive = (self._spawned and self._proc is not None
+                             and self._proc.poll() is None)
+            if not already_alive:
+                if not os.path.isfile(self.python_path):
+                    raise IrodoriLaunchError(
+                        f"Irodori ランタイムが見つかりません: {self.python_path}（設定 irodori_runtime_path を確認）")
+                cmd = [self.python_path, "-m", "vd_server",
+                       "--port", str(self.port), "--device", self.device]
+                if self.checkpoint:
+                    cmd += ["--checkpoint", self.checkpoint]
+                _status("Irodori: サーバ起動中…", "working")
+                self._proc = self._spawn(cmd)
+                self._spawned = True
+            deadline = _time.monotonic() + ready_timeout
+            while _time.monotonic() < deadline:
+                if self.is_healthy():
+                    _status("Irodori: ready", "ok")
+                    return True
+                self._sleep(2.0)
+            _status("Irodori: 起動がタイムアウトしました", "error")
+            return False
 
     def stop(self):
         if self._spawned and self._proc is not None:
