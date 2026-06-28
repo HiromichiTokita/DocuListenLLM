@@ -1,10 +1,32 @@
+# ビルド成果物
 engine/
 dist/
 build/
-__pycache__/
 *.zip
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.pytest_cache/
+
+# 実行時の一時ファイル
+temp_*.wav
+app_debug.log
+build_log.txt
 out.txt
 err.txt
+
+# ユーザー設定（個人環境依存）
 settings.json
-.venv/
-*.pyc
+
+# 非公開フォルダ・ファイル
+archive/
+IrodoriTTS/
+DocuListen_開発経緯.pptx
+docs/superpowers/
+
+# ツール内部ファイル
+.claude/
+.superpowers/

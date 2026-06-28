@@ -1,6 +1,6 @@
 # DocuListenLLM 引継ぎ資料（handoff）
 
-> 最終更新: 2026-06-26 ／ 対象バージョン: **v1.3.0**
+> 最終更新: 2026-06-27（夜）／ 対象バージョン: **v1.3.0**
 > 本書は開発を引き継ぐ／再開する際の**単一の現状把握ドキュメント**です。
 > （旧 `HANDOVER.md` / `DEVELOPMENT_HISTORY.md` を本書に統合・一本化しました。）
 
@@ -8,16 +8,16 @@
 
 ## 0. 重要ステータス（最初に読む）
 
+- ✅ **git init 完了**（2026-06-27、C-Task 0、コミット `53a59a4`）。以後はコミット履歴でロールバック可。
 - ✅ **バージョン文字列の不整合は解消済み**（2026-06-26）: `main.py` の `APP_VERSION` を
-  **`v1.3.0`** に修正し、配布物（`dist/DocuListen_v1.3.0/`）と一致。`build.py` は `APP_VERSION` を
-  正規表現で自動参照するため全箇所に反映。`py -m py_compile main.py` 通過確認済み。
-- ✅ **`miniaudio` 依存は不要**（2026-06-26）: BGM機能を削除したため。`requirements.txt` /
-  `DocuListen.spec` / `main.py` のいずれにも残存なしを確認済み。
-- ⚠️ **実行 Python は 3.14**（`C:\Users\toki0\AppData\Local\Python\pythoncore-3.14-64\python.exe`、`py` のデフォルト）。
-  PATH の `python` は **3.12 で別物**（customtkinter 等が入っていない）。
+  **`v1.3.0`** に修正し、配布物（`dist/DocuListen_v1.3.0/`）と一致。
+- ✅ **`miniaudio` 依存は不要**（2026-06-26）: BGM機能を削除したため。
+- ✅ **UI刷新完了**（2026-06-27）: 4タブ→2タブ（ルールベース／配役）。詳細は §4-UI。
+- ⚠️ **実行 Python は 3.14**（`py` のデフォルト）。PATH の `python` は 3.12 で別物。
   pip install・実行・ビルドは必ず **`py main.py` / `py build.py`（=3.14）** で行うこと。
-- ⚠️ **Git 未導入**（本体リポジトリ）。履歴・ロールバック不能。**削除は復元不可**。`git init` を最優先で推奨。
-- 🚧 **IrodoriTTS サーバ（サブPJ）は実装未着手**。設計・環境準備は完了。詳細は §8。
+- 🚧 **バッチLLM配役の動作確認が未完**（2026-06-27夜）: `format="json"` + 90秒タイムアウトに変更したが
+  実際に配役が完了するかユーザー未確認。次回起動時に要確認。詳細は §4-UI。
+- 🚧 **IrodoriTTS C-Task5（E2E GPU・声固定）は未完**。詳細は §8。
 
 ---
 
@@ -38,8 +38,8 @@
 
 | 項目 | 状態 |
 |------|------|
-| バージョン管理 | **Git 管理外**（本体）。バックアップは手動。`IrodoriTTS/` と `E:\project\Irodori-TTS-code` は各々独立した git |
-| メインソース | `main.py`（約2,895行。v1.3.0で14機能追加・BGM実装→削除） |
+| バージョン管理 | **git 管理中**（本体 DocuListenLLM、2026-06-27 init）。`IrodoriTTS/` と `E:\project\Irodori-TTS-code` も各々独立した git |
+| メインソース | `main.py`（約2,950行。v1.3.0で14機能追加・BGM実装→削除。配役UI刷新 + Irodori統合 2026-06-27） |
 | 旧ソース | `archive/main_old.py`（v0.0.1相当・1,202行、参照用） |
 | ビルド | `build.py`（PyInstaller ラッパー。`APP_VERSION` を自動参照）、`DocuListen.spec` |
 | 設定 | `settings.json`（全UI状態を保存。削除でデフォルトに戻る） |
@@ -61,6 +61,22 @@
 2026-06-17  ―        リポジトリ軽量化・整理（依存整理／不要コード削除）
 2026-06-25  v1.3.0   14機能追加（BGM等）・提案資料作成
 2026-06-26  ―        BGM削除／APP_VERSION整合／handoff資料一本化
+2026-06-27  ―        キャスティングUI刷新: 4タブ→2タブ（ルールベース／配役）
+2026-06-27  ―        ルールベースタブにIrodoriエンジン選択追加・配役タブに一括設定ボタン追加
+2026-06-27  ―        AI配役UX刷新: 🤖AI配役ボタンは「配役のみ」に分離（再生しない）、▶で再生
+2026-06-27  ―        🔍LLM確認ボタン追加（Ollama起動確認＋モデル存在確認）
+2026-06-27  ―        AI配役をバッチ処理化（30件/1LLM呼び出し、500件→50秒に短縮）
+2026-06-27  ―        AI配役からStage1（自動抽出）を分離: AI配役は既存キャラ辞書で配役のみ
+2026-06-27  ―        ボタン順を「📖自動抽出→🤖AI配役」に入れ替え、ヒントテキスト更新
+2026-06-27  ―        LLM確認をポップアップダイアログに変更（tkinter.messagebox）
+2026-06-27  ―        バッチ配役: format=dictスキーマ→format="json"に変更（Ollama旧版対応）、90秒タイムアウト追加、コンテキスト除去でトークン削減、BATCH_SIZE=10
+2026-06-28  ―        プレイリストパネル追加: 「📋 リスト」ボタンでタブ右半分にパネル表示/非表示トグル
+2026-06-28  ―        D&D対応: プレイリストパネルへファイルをドロップで追加、テキストボックスへドロップで即開く（tkinterdnd2）
+2026-06-28  ―        プレイリスト連続再生: _queue_full_text で全文を_producerへ渡す（textboxに全文を入れない）。シーク時も_update_chunks()スキップ
+2026-06-28  ―        プレイリストアイテムクリックでテキストエリアに読み込み（_playlist_open）
+2026-06-28  ―        プレイリスト保存: 終了時にsettings.jsonへ自動保存、起動時に自動復元（存在しないファイルは除外）
+2026-06-28  ―        提案資料（docs/presentation_DocuListenLLM.md）を会社提案・開発結果報告向けに更新
+2026-06-28  ―        GitHub公開準備: .gitignore整備（temp_*.wav/log/archive/IrodoriTTS等を除外）・README.md作成
 ```
 
 開発スタイル: **ユーザーの「読めない／おかしい」報告を起点に、原因を切り分けて修正する反復改善型**。
@@ -118,15 +134,42 @@
 
 ## 4. 技術アーキテクチャ（現行）
 
+### UI現状（2026-06-27 時点）
+
+**2タブ構成**（旧4タブから統合）:
+
+| タブ | 内容 |
+|------|------|
+| ルールベース | 地の文・セリフの声を直接指定。**エンジン選択（VOICEVOX/Irodori）を各行に追加**。 |
+| 配役 | 14アーキタイプ×VOICEVOX/Irodori切替。📖自動抽出→🤖AI配役→▶再生の3ステップ |
+
+**配役タブのフロー（2026-06-27 改定）**:
+```
+① 📖自動抽出（任意）: テキストからキャラ名+属性を自動抽出 → キャラ辞書へ保存
+② 🤖AI配役: 既存キャラ辞書を使ってセリフをバッチLLM分類 → スクリプトに style_id 書込
+③ ▶ 再生: 配役済みスクリプトをそのまま再生（LLM再実行なし）
+```
+
+**主要メソッド（配役タブ）**:
+- `_on_cast_button` → `_llm_cast_only`（Stage2バッチ配役のみ、再生しない）
+  - `BATCH_SIZE=30`、セリフ30件/LLM呼び出し、`format="json"`、90秒タイムアウト
+  - 完了後ステータス: `"✅ AI配役完了 (N件) — ▶ を押して再生"`
+  - Stage1（自動抽出）は **含まない**（📖ボタンで別途実行）
+- `_on_play` 配役タブ → `_start_playback(start_index)` 直接呼び出し（LLMなし）
+- `_start_extraction` → `_extraction_thread`（Stage1のみ、再生なし）
+
+**LLM確認ボタン**（設定タブ）: 🔍LLM確認 → `_check_ollama_bg` → tkinter.messagebox でポップアップ表示
+（✅起動OK / ⚠️モデルなし / ❌接続失敗）
+
 ### 2段階 LLMパイプライン
 ```
 入力文書 → チャンク分割(_split_text)
-  → Stage1: 人物プロファイリング(PROFILING_PROMPT) → {"characters":[{name,category}]}
-            （dirtyフラグで初回再生時のみ自動実行）
-  → Stage2: セリフ配役(ATTRIBUTION_PROMPT) per-chunk ±10チャンク文脈で話者カテゴリ推定
-            （失敗・"ナレーション"・未知カテゴリ時は直前話者にフォールバック）
-  → VOICEVOX 合成 → producer/consumer ストリーミング再生
+  → [任意] Stage1: 📖自動抽出 → {"characters":[{name,category}]} → キャラ辞書
+  → 🤖AI配役: セリフをバッチ30件でLLM分類 → script[i].style_id / .category 書込
+  → ▶再生: _start_playback → producer/consumer ストリーミング再生
 ```
+
+**旧パイプライン（_llm_and_play_thread）は残存**（削除せず）。Irodoriバックグラウンド再生には引き続き使用。
 
 ### 14カテゴリ（固定）
 `主人公 女/男、子供 男/女、若者 男/女、中年 男/女、老人 男/女、ロボット、
@@ -310,8 +353,12 @@ torchcodecはWindowsでffmpeg依存があり面倒なため**ref_latent方式（
 - ✅ **C-Task3**（`f33fdc6`）: 設定 `category_engines`、producer が**チャンク毎に `engine_for` でエンジン決定**、
   mixedで irodori を使うなら遅延起動。
 - ✅ **C-Task4**（`442b4d0`）: global選択を **voicevox/irodori/mixed** の3択化、各役＋ナレーター行に**エンジン選択ドロップダウン**＋`_set_category_engine`。
+- ✅ **UI再設計（2026-06-27）**: グローバルエンジンドロップダウンを廃止、**タブ＝エンジン**方式（ルールベース/VOICEVOX/AIディレクター/Mixed）。タブ切替で `engine_var` を自動更新 (`_on_tab_changed`)。Mixed タブに自動振り分けボタン＋カテゴリ毎エンジンドロップダウン。AIディレクタータブに声固定チェック＋🎲リロール。
+- ✅ **ファイルロギング（2026-06-27）**: `app_debug.log`（起動時 `mode="w"` で初期化・UTF-8・DEBUG全記録）。PRODUCER_START・CHUNK毎・IRODORI_SYNTH・TAB_CHANGED 等を出力、障害診断に使用。
+- ✅ **Mixed mode dialogue routing fix（2026-06-27）**: `_iter_script()` のスクリプトエントリはStage2がチャンク0から順に処理するため、3600番目付近は数十分待たないと `category` が未付与→全部`ナレーション`→全voicevox。**Producer内フォールバック追加**: `_global_engine=="mixed"` かつ `cat=="ナレーション"` かつチャンクが `「」` 始まり → `cat="主人公 女"` に上書き（`MIXED_FALLBACK` ログ）。
+- ✅ **Irodori 先行起動（2026-06-27）**: Mixed/AIディレクタータブ選択時に `_preheat_irodori()` をバックグラウンドで起動。ステータスバーに進捗表示（503→21秒→200）、再生ボタン押下前に起動完了するためUX改善。
 - ⏳ **C-Task5（E2E・GPU）のみ未**: ①global=irodori＋声固定ON→**声がカテゴリ毎に一貫**（ref_latent修正の本命検証）／
-  ②global=mixed→カテゴリ毎に正しいエンジンで読み上げ／③global=voicevox→従来通り。後方互換: `category_engines`既定空・既定voicevox。
+  ②global=mixed→カテゴリ毎に正しいエンジンで読み上げ（ログで`MIXED_FALLBACK`動作確認済み）／③global=voicevox→従来通り。後方互換: `category_engines`既定空・既定voicevox。
 
 #### サブPJ-2b（表現力・将来）
 セリフ単位の感情/スタイル分類LLM による動的キャプション（喜怒哀楽）を別 spec→plan で。
@@ -368,13 +415,26 @@ torchcodecはWindowsでffmpeg依存があり面倒なため**ref_latent方式（
 
 ## 9. 既知の課題・引継ぎTODO
 
-- [ ] **`git init`** + `.gitignore`（`dist/`, `build/`, `__pycache__/`, `engine/`大容量, `*.zip`, `out.txt`, `err.txt`）— 最優先
+### 最優先（次回作業開始時）
+- [ ] **バッチLLM配役の動作確認**: `py main.py` 起動 → 配役タブ → 📖自動抽出 → 🤖AI配役 → 完了メッセージが出るか確認
+  - タイムアウト90秒で各バッチが終わるはず。ステータスバーに「AI: 配役中... (1/Nバッチ, ...)」が出れば動いている
+  - 「✅ AI配役完了」が出たら ▶ で再生して声の違いを確認
+- [ ] **C-Task5（E2E GPU・声固定）**: IrodoriVDServer リポジトリ。global=irodori + 声固定ON で声がカテゴリ毎に一貫するか検証
+
+### 通常TODO
 - [ ] 配布用クリーン `settings.json`（人物リスト空）の用意
 - [ ] **大容量同梱**（`engine/` 約2.16GB ＋ `dist/*.zip`）の配布/バックアップ運用方針の整理
-- [ ] IrodoriTTS サーバの再計画＋実装（§8）
+- [ ] IrodoriTTS C-Task5 以降の実装（§8）
+
+### 完了済み
+- [x] ~~`git init`~~ （2026-06-27 C-Task 0、コミット `53a59a4`）
 - [x] ~~`APP_VERSION` を v1.3.0 に統一~~（2026-06-26 完了）
 - [x] ~~`requirements.txt` を実依存に更新／`miniaudio`・`librosa` 不要化~~（完了）
 - [x] ~~バージョン番号の一元管理~~（`APP_VERSION` へ集約済み）
+- [x] ~~4タブ→2タブ（ルールベース/配役）UI刷新~~（2026-06-27）
+- [x] ~~AI配役をバッチ処理化・再生から分離~~（2026-06-27）
+- [x] ~~IrodoriTTS サーバ（サブPJ-1）完了~~（2026-06-27）
+- [x] ~~IrodoriTTS 本体統合 C-Task1〜4（エンジン選択・ref_latent）~~（2026-06-27）
 
 ---
 

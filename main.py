@@ -1,5 +1,6 @@
 """VOICEVOX テキスト読み上げ (AI Audio Director 対応版)"""
 import json
+import logging
 import os
 import queue
 import re
@@ -8,7 +9,7 @@ import sys
 import threading
 import time
 from tkinter import filedialog
-from typing import Optional
+from typing import Any, Optional
 import customtkinter as ctk
 import numpy as np
 import ollama
@@ -20,6 +21,12 @@ import sounddevice as sd
 import soundfile as sf
 
 import irodori_engine
+
+try:
+    import tkinterdnd2 as _dnd2
+    _HAS_DND = True
+except ImportError:
+    _HAS_DND = False
 
 try:
     from docx import Document as DocxDocument
@@ -53,6 +60,17 @@ SPEED_DEFAULT = 1.0
 APP_VERSION   = "v1.3.0"
 DEBUG         = False  # True にするとデバッグ出力が有効になります
 VOLUME_DEFAULT = 1.0
+
+# ─── ファイルログ設定 ──────────────────────────
+_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_debug.log")
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(_LOG_PATH, encoding="utf-8", mode="w"),
+    ],
+)
+_LOG = logging.getLogger("DocuListen")
 
 OLLAMA_MODEL_DEFAULT = "llama3.2"
 
@@ -107,6 +125,16 @@ You MUST choose EXACTLY ONE category from this exact list (DO NOT use "ナレー
 
 Output ONLY a JSON object with a single key "category". Do not output anything else.
 """
+
+BATCH_CAST_PROMPT = (
+    "あなたは日本語小説の話者分析AIです。\n"
+    "キャラクタープロファイルを参考に、各セリフの話者アーキタイプを分類してください。\n\n"
+    "キャラクタープロファイル:\n{character_profile}\n\n"
+    "入力: セリフリスト（idx と dialogue のJSON配列）\n"
+    "出力: 以下の形式のJSONのみ返してください（余分なテキスト不要）:\n"
+    "{\"results\": [{\"idx\": 0, \"category\": \"アーキタイプ名\"}, ...]}\n\n"
+    "不明な場合は \"主人公 女\" を使用。category は必ずプロファイルの category 値から選ぶこと。"
+)
 
 STATUS_COLORS = {
     "idle":    ("gray50",     "gray60"),
@@ -438,6 +466,11 @@ class _TeeStream(io.TextIOBase):
 class VoicevoxTTSApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
+        if _HAS_DND:
+            try:
+                _dnd2.TkinterDnD._require(self)
+            except Exception:
+                pass
         self.title(f"VOICEVOX テキスト読み上げ (AI Audio Director) {APP_VERSION}")
         self.geometry("1000x900")
         self.minsize(800, 800)
@@ -492,6 +525,14 @@ class VoicevoxTTSApp(ctk.CTk):
         _s.setdefault("category_engines", {})
         self._caption_seeds: dict[str, int] = dict(_s.get("caption_seeds", {}))
         self._category_engines: dict[str, str] = dict(_s.get("category_engines", {}))
+        # caption_vars / narrator_caption_var を UI 構築前に初期化（両タブで共有するため）
+        _caps_s = _s.get("captions", {})
+        self.caption_vars: dict[str, ctk.StringVar] = {
+            cat: ctk.StringVar(value=_caps_s.get(cat, cap))
+            for cat, cap in irodori_engine.DEFAULT_CAPTIONS.items()
+        }
+        self.narrator_caption_var = ctk.StringVar(
+            value=_s.get("narrator_caption", irodori_engine.DEFAULT_NARRATOR_CAPTION))
         self._irodori = irodori_engine.IrodoriServerManager(
             runtime_path=_s.get("irodori_runtime_path", ""),
             port=int(_s.get("irodori_port", 8770)),
@@ -509,7 +550,8 @@ class VoicevoxTTSApp(ctk.CTk):
         self._log_textbox: Optional[ctk.CTkTextbox] = None
         self._script_cache: dict[str, list] = {}
         self._last_positions: dict[str, int] = self._settings.get("last_positions", {})
-        self._file_queue: list[str] = []
+        self._file_queue: list[str] = [p for p in self._settings.get("file_queue", []) if os.path.exists(p)]
+        self._playlist_visible: bool = False
 
         import sys as _sys
         _sys.stdout = _TeeStream(_sys.stdout, lambda: self._log_textbox)
@@ -525,6 +567,8 @@ class VoicevoxTTSApp(ctk.CTk):
         self.bind("?",              lambda e: self._show_shortcuts())
         threading.Thread(target=self._start_engine_and_init, daemon=True).start()
         threading.Thread(target=self._fetch_ollama_models, daemon=True).start()
+        if self._file_queue:
+            self.after(200, self._refresh_playlist_panel)
 
     # ─── 設定ファイル ─────────────────────────
     def _load_settings(self) -> dict:
@@ -579,6 +623,7 @@ class VoicevoxTTSApp(ctk.CTk):
             "irodori_use_ref":      self.use_ref_var.get() if hasattr(self, "use_ref_var") else self._settings.get("irodori_use_ref", True),
             "caption_seeds":        {c: int(v) for c, v in self._caption_seeds.items()} if hasattr(self, "_caption_seeds") else self._settings.get("caption_seeds", {}),
             "category_engines":     dict(self._category_engines) if hasattr(self, "_category_engines") else self._settings.get("category_engines", {}),
+            "file_queue":           [p for p in getattr(self, "_file_queue", []) if os.path.exists(p)],
         }
         try:
             with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
@@ -661,6 +706,39 @@ class VoicevoxTTSApp(ctk.CTk):
     def _on_cpu_settings_changed(self, _: str = "") -> None:
         self._save_settings()
         self._apply_engine_resource_limits()
+
+    def _check_ollama(self) -> None:
+        """Ollamaの起動確認とモデル存在確認をバックグラウンドで行う。"""
+        threading.Thread(target=self._check_ollama_bg, daemon=True).start()
+
+    def _check_ollama_bg(self) -> None:
+        import tkinter.messagebox as mb
+        model = self.ollama_model_var.get().strip() or OLLAMA_MODEL_DEFAULT
+        try:
+            resp = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
+            resp.raise_for_status()
+            models = [m["name"] for m in resp.json().get("models", [])]
+            if not models:
+                msg = "Ollama は起動していますが、モデルが1つもありません。\nターミナルで ollama pull llama3.2 などを実行してください。"
+                self.after(0, lambda: self._set_status("⚠️ Ollama 起動済み・モデルなし", "error"))
+                self.after(0, lambda: mb.showwarning("LLM確認", msg))
+                return
+            if model in models:
+                msg = f"✅ Ollama 起動中\nモデル「{model}」が利用可能です。\n\n利用可能なモデル: {', '.join(models[:8])}"
+                self.after(0, lambda: self._set_status(f"✅ Ollama 起動済み — {model} 利用可能", "ok"))
+                self.after(0, lambda: mb.showinfo("LLM確認", msg))
+            else:
+                names = ", ".join(models[:8])
+                msg = f"⚠️ モデル「{model}」が見つかりません。\n\n利用可能なモデル:\n{names}\n\nドロップダウンから利用可能なモデルを選択してください。"
+                self.after(0, lambda: self._set_status(f"⚠️ モデル '{model}' なし", "error"))
+                self.after(0, lambda: mb.showwarning("LLM確認", msg))
+        except requests.exceptions.ConnectionError:
+            msg = "❌ Ollama に接続できません。\n\nターミナルで「ollama serve」を実行して起動してください。"
+            self.after(0, lambda: self._set_status("❌ Ollama 未起動", "error"))
+            self.after(0, lambda: mb.showerror("LLM確認", msg))
+        except Exception as exc:
+            self.after(0, lambda e=str(exc): self._set_status(f"LLM確認エラー: {e}", "error"))
+            self.after(0, lambda e=str(exc): mb.showerror("LLM確認エラー", e))
 
     # ─── Ollamaモデル一覧取得 ────────────────
     def _fetch_ollama_models(self) -> None:
@@ -902,20 +980,15 @@ class VoicevoxTTSApp(ctk.CTk):
             onvalue=True, offvalue=False)
         self.ruby_kana_check.pack(side="left", padx=(16, 0))
 
-        ctk.CTkLabel(frame, text="エンジン:", width=60, anchor="e").pack(
-            side="left", padx=(16, 2))
         self.engine_var = ctk.StringVar(value=self._settings.get("tts_engine", "voicevox"))
-        ctk.CTkOptionMenu(
-            frame, values=["voicevox", "irodori", "mixed"], variable=self.engine_var, width=110,
-            command=lambda _v: self._on_engine_changed()).pack(side="left", padx=(0, 6))
-        self.irodori_status_label = ctk.CTkLabel(
-            frame, text="", font=ctk.CTkFont(size=11), text_color="gray60")
-        self.irodori_status_label.pack(side="left")
-
         self.use_ref_var = ctk.BooleanVar(value=self._settings.get("irodori_use_ref", True))
-        ctk.CTkCheckBox(frame, text="声を固定", variable=self.use_ref_var,
-                        onvalue=True, offvalue=False,
-                        command=self._save_settings).pack(side="left", padx=(8, 0))
+
+        self._playlist_toggle_btn = ctk.CTkButton(
+            frame, text="📋 リスト", width=90,
+            fg_color="gray30", hover_color="gray20",
+            command=self._toggle_playlist,
+        )
+        self._playlist_toggle_btn.pack(side="right", padx=(0, 6))
 
         ctk.CTkButton(
             frame, text="🖥 ログ", width=80,
@@ -923,16 +996,173 @@ class VoicevoxTTSApp(ctk.CTk):
             command=self._open_log_window,
         ).pack(side="right")
 
-        self._on_engine_changed()  # 初期状態ラベルを反映
-
     def _on_engine_changed(self) -> None:
-        """エンジン切替時: 設定更新と状態ラベル表示（実際の起動は再生時）。"""
         eng = self.engine_var.get()
         self._settings["tts_engine"] = eng
-        if eng == "irodori":
-            self.irodori_status_label.configure(text="Irodori: 未起動")
-        else:
-            self.irodori_status_label.configure(text="")
+        self._save_settings()
+
+    def _on_tab_changed(self) -> None:
+        tab_name = self.tabview.get()
+        if tab_name == "ルールベース":
+            self._update_rb_engine()
+        elif tab_name == "配役":
+            self.engine_var.set("mixed")
+            self._on_engine_changed()
+            if any(v == "irodori" for v in self._category_engines.values()):
+                threading.Thread(target=self._preheat_irodori, daemon=True).start()
+        _LOG.info("TAB_CHANGED tab=%s engine=%s", tab_name, self.engine_var.get())
+
+    def _on_cast_button(self) -> None:
+        """AI配役ボタン: Stage1+Stage2を実行して配役のみ行う（再生しない）。"""
+        if self._is_llm_processing:
+            self._set_status("AI配役処理中です...", "working")
+            return
+        threading.Thread(target=self._llm_cast_only, daemon=True).start()
+
+    def _llm_cast_only(self) -> None:
+        """Stage2バッチ配役のみ。再生しない。自動抽出は📖ボタンで別途行う。"""
+        BATCH_SIZE = 30
+        self._is_llm_processing = True
+        try:
+            model = self.ollama_model_var.get().strip() or OLLAMA_MODEL_DEFAULT
+            self.after(0, lambda: self._set_controls_enabled(False))
+
+            # ── スクリプト初期化 ──
+            narrator_id_c = self._get_speaker_id(
+                self.narrator_char_var.get(), self.narrator_style_var.get(), fallback=2)
+            dialogue_id_c = self._get_speaker_id(
+                self.dialogue_char_var.get(), self.dialogue_style_var.get(), fallback=2)
+            valid_openers = tuple(
+                q.get()[0] for q in [self.quote1_var, self.quote2_var, self.quote3_var]
+                if q.get() != "なし" and len(q.get()) == 2
+            )
+            if not valid_openers:
+                valid_openers = ("「",)
+
+            _cache_key = self._text_hash()
+            self._script = [
+                {
+                    "text": c,
+                    "style_id": _speaker_for_chunk(c, narrator_id_c, dialogue_id_c, valid_openers),
+                }
+                for c in self._chunks
+            ]
+
+            # ── Stage 2 バッチ配役 ──
+            character_profile_json = self._get_character_profile_json()
+            total_chunks = len(self._chunks)
+            dialogue_indices = [
+                i for i, c in enumerate(self._chunks)
+                if c.startswith(valid_openers)
+            ]
+            total_dialogue = len(dialogue_indices)
+            cast_count = 0
+            default_cat = "主人公 女"
+
+            batches = [dialogue_indices[i:i + BATCH_SIZE]
+                       for i in range(0, total_dialogue, BATCH_SIZE)]
+            system_msg = BATCH_CAST_PROMPT.replace(
+                "{character_profile}", character_profile_json)
+
+            for b_idx, batch_idxs in enumerate(batches):
+                self.after(0, lambda b=b_idx, t=len(batches): self._set_status(
+                    f"AI: 配役中... ({b + 1}/{t}バッチ, {min((b+1)*BATCH_SIZE, total_dialogue)}/{total_dialogue}件)",
+                    "working"))
+
+                items = [
+                    {"idx": i, "dialogue": self._chunks[i][:200]}
+                    for i in batch_idxs
+                ]
+
+                _resp_holder: list = [None]
+                _err_holder:  list = [None]
+
+                def _do_call(it=items, sm=system_msg, m=model, rh=_resp_holder, eh=_err_holder):
+                    try:
+                        rh[0] = ollama.chat(
+                            model=m,
+                            messages=[
+                                {"role": "system", "content": sm},
+                                {"role": "user",   "content": json.dumps(it, ensure_ascii=False)},
+                            ],
+                            format="json",
+                            options={"num_ctx": 4096},
+                        )
+                    except Exception as exc:
+                        eh[0] = exc
+
+                _t = threading.Thread(target=_do_call, daemon=True)
+                _t.start()
+                _t.join(timeout=90)
+
+                results: list = []
+                if _t.is_alive():
+                    _LOG.warning("Batch %d timed out (90s)", b_idx)
+                elif _err_holder[0] is not None:
+                    _LOG.warning("Batch %d error: %s", b_idx, _err_holder[0])
+                else:
+                    try:
+                        raw = (_resp_holder[0].message.content
+                               if hasattr(_resp_holder[0], "message")
+                               else _resp_holder[0]["message"]["content"])
+                        parsed_batch = json.loads(raw)
+                        if isinstance(parsed_batch, list):
+                            results = parsed_batch
+                        else:
+                            results = parsed_batch.get("results", [])
+                        if not isinstance(results, list):
+                            results = []
+                    except Exception as exc:
+                        _LOG.warning("Batch %d parse error: %s", b_idx, exc)
+
+                # バッチ結果を script に反映
+                result_map = {r.get("idx"): str(r.get("category", default_cat)).strip()
+                              for r in results if isinstance(r, dict)}
+                for i in batch_idxs:
+                    category = result_map.get(i, default_cat)
+                    if category not in self.archetype_vars:
+                        category = default_cat
+                    c_name   = self.archetype_vars[category]["char"].get()
+                    s_name   = self.archetype_vars[category]["style"].get()
+                    style_id = self._get_speaker_id(c_name, s_name, fallback=2)
+                    self._script[i]["style_id"] = style_id
+                    self._script[i]["category"] = category
+                    cast_count += 1
+
+            self._script_cache[_cache_key] = [dict(e) for e in self._script]
+            self.after(0, lambda n=cast_count: self._set_status(
+                f"✅ AI配役完了 ({n}件) — ▶ を押して再生", "ok"))
+
+        except Exception as exc:
+            _LOG.error("_llm_cast_only error: %s", exc)
+            self.after(0, lambda e=str(exc): self._set_status(f"AI配役エラー: {e}", "error"))
+        finally:
+            self._is_llm_processing = False
+            self.after(0, lambda: self._set_controls_enabled(True))
+
+    def _preheat_irodori(self) -> None:
+        """Irodoriをバックグラウンドで先行起動。タブ切り替え時に呼ぶことで再生時の待ち時間をなくす。"""
+        try:
+            _LOG.info("PREHEAT_IRODORI start")
+            self.after(0, lambda: self._set_status("Irodori 起動準備中...", "working"))
+            ok = self._irodori.ensure_running(
+                on_status=lambda m, k="working": self.after(
+                    0, lambda mm=m, kk=k: self._set_status(mm, kk)))
+            _LOG.info("PREHEAT_IRODORI done ok=%s", ok)
+            if ok:
+                self.after(0, lambda: self._set_status("Irodori 起動完了 — 再生できます", "ok"))
+            else:
+                self.after(0, lambda: self._set_status("Irodori 起動に失敗しました", "error"))
+        except Exception as exc:
+            _LOG.warning("PREHEAT_IRODORI error: %s", exc)
+
+    def _auto_fill_mixed(self) -> None:
+        """Mixed タブの自動振り分け: ナレーター=voicevox、全キャラ=irodori。"""
+        self._category_engines["__narrator__"] = "voicevox"
+        for cat in irodori_engine.DEFAULT_CAPTIONS:
+            self._category_engines[cat] = "irodori"
+        for key, var in getattr(self, "_cat_eng_vars", {}).items():
+            var.set(self._category_engines.get(key, "voicevox"))
         self._save_settings()
 
     def _reroll_voice(self, category: str) -> None:
@@ -947,6 +1177,30 @@ class VoicevoxTTSApp(ctk.CTk):
         self._category_engines[category] = engine
         self._save_settings()
 
+    def _bulk_set_category_engine(self, display_val: str) -> None:
+        """配役タブの全カテゴリを一括で VOICEVOX / Irodori に設定する。"""
+        for cat, switch_fn in getattr(self, "_cat_eng_switch_fns", {}).items():
+            switch_fn(display_val)
+            if cat in self._cat_eng_vars:
+                self._cat_eng_vars[cat].set(display_val)
+        self._save_settings()
+        if display_val == "Irodori":
+            threading.Thread(target=self._preheat_irodori, daemon=True).start()
+
+    def _update_rb_engine(self) -> None:
+        """ルールベースタブのエンジン選択状態に合わせて engine_var を更新する。"""
+        nar_iro = self._category_engines.get("__narrator__") == "irodori"
+        dlg_iro = self._category_engines.get("主人公 女") == "irodori"
+        if nar_iro or dlg_iro:
+            self.engine_var.set("mixed")
+            if nar_iro or dlg_iro:
+                threading.Thread(target=self._preheat_irodori, daemon=True).start()
+        else:
+            self.engine_var.set("voicevox")
+        self._on_engine_changed()
+        _LOG.info("RB_ENGINE_UPDATE nar_iro=%s dlg_iro=%s engine=%s",
+                  nar_iro, dlg_iro, self.engine_var.get())
+
     def _build_text_frame(self) -> None:
         frame = ctk.CTkFrame(self, fg_color="transparent")
         frame.grid(row=1, column=0, sticky="nsew", padx=12, pady=(8, 0))
@@ -956,6 +1210,12 @@ class VoicevoxTTSApp(ctk.CTk):
         self.textbox = ctk.CTkTextbox(frame, font=ctk.CTkFont(size=14), wrap="word")
         self.textbox.grid(row=0, column=0, sticky="nsew")
         self.textbox.insert("1.0", "ここにテキストを入力してください。")
+        if _HAS_DND:
+            try:
+                self.textbox.drop_target_register(_dnd2.DND_FILES)
+                self.textbox.dnd_bind("<<Drop>>", self._on_textbox_drop)
+            except Exception:
+                pass
         self._char_count_label = ctk.CTkLabel(
             frame, text="0 文字", anchor="e",
             font=ctk.CTkFont(size=11), text_color="gray60")
@@ -1012,20 +1272,203 @@ class VoicevoxTTSApp(ctk.CTk):
         self.time_label.grid(row=0, column=2, padx=(4, 10), pady=8)
 
     def _build_casting_frame(self) -> None:
-        self.tabview = ctk.CTkTabview(self, height=220)
-        self.tabview.grid(row=5, column=0, sticky="ew", padx=12, pady=(6, 0))
+        self._casting_container = ctk.CTkFrame(self, fg_color="transparent")
+        self._casting_container.grid(row=5, column=0, sticky="ew", padx=12, pady=(6, 0))
+        self._casting_container.grid_columnconfigure(0, weight=1)
+
+        self.tabview = ctk.CTkTabview(self._casting_container, height=240, command=self._on_tab_changed)
+        self.tabview.grid(row=0, column=0, sticky="ew")
+
+        # プレイリストパネル（初期非表示）
+        self._playlist_panel = ctk.CTkFrame(self._casting_container, width=260)
+        self._playlist_panel.grid_propagate(False)
+        self._build_playlist_panel()
+
         self.tabview.add("ルールベース")
-        self.tabview.add("AIディレクター (15役)")
+        self.tabview.add("配役")
 
         self._build_rule_based_tab(self.tabview.tab("ルールベース"))
-        self._build_llm_archetypes_tab(self.tabview.tab("AIディレクター (15役)"))
+        self._build_haikyaku_tab(self.tabview.tab("配役"))
+
+        _engine_to_tab = {"voicevox": "ルールベース", "irodori": "配役", "mixed": "配役"}
+        _init_tab = _engine_to_tab.get(self._settings.get("tts_engine", "voicevox"), "ルールベース")
+        self.tabview.set(_init_tab)
+        if _init_tab == "配役":
+            self.engine_var.set("mixed")
+
+    def _build_playlist_panel(self) -> None:
+        """プレイリストパネルの中身を構築（初期は非表示）。"""
+        panel = self._playlist_panel
+        panel.grid_rowconfigure(1, weight=1)
+        panel.grid_columnconfigure(0, weight=1)
+
+        # ヘッダ
+        hdr = ctk.CTkFrame(panel, fg_color="transparent")
+        hdr.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 2))
+        hdr.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(hdr, text="📋 プレイリスト", anchor="w",
+                     font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(hdr, text="🗑", width=28, height=24,
+                      command=self._playlist_clear).grid(row=0, column=2, padx=(2, 0))
+        ctk.CTkButton(hdr, text="➕", width=28, height=24,
+                      command=self._playlist_add).grid(row=0, column=1, padx=(4, 2))
+
+        # スクロールリスト
+        self._playlist_scroll = ctk.CTkScrollableFrame(panel, height=180)
+        self._playlist_scroll.grid(row=1, column=0, sticky="nsew", padx=4, pady=(0, 4))
+        self._playlist_scroll.grid_columnconfigure(0, weight=1)
+
+        # ▶ 連続再生ボタン
+        ctk.CTkButton(panel, text="▶ 連続再生", height=28,
+                      command=self._start_queue_playback).grid(
+            row=2, column=0, sticky="ew", padx=4, pady=(0, 4))
+
+        # D&D 登録
+        if _HAS_DND:
+            for w in [panel, self._playlist_scroll]:
+                try:
+                    w.drop_target_register(_dnd2.DND_FILES)
+                    w.dnd_bind("<<Drop>>", self._on_playlist_drop)
+                except Exception:
+                    pass
+
+    def _toggle_playlist(self) -> None:
+        if self._playlist_visible:
+            self._playlist_panel.grid_forget()
+            self._playlist_visible = False
+            if hasattr(self, "_playlist_toggle_btn"):
+                self._playlist_toggle_btn.configure(fg_color="gray30")
+        else:
+            self._playlist_panel.grid(row=0, column=1, sticky="ns", padx=(6, 0))
+            self._refresh_playlist_panel()
+            self._playlist_visible = True
+            if hasattr(self, "_playlist_toggle_btn"):
+                self._playlist_toggle_btn.configure(fg_color=("#1a73e8", "#1565c0"))
+
+    def _refresh_playlist_panel(self) -> None:
+        if not hasattr(self, "_playlist_scroll"):
+            return
+        for w in self._playlist_scroll.winfo_children():
+            w.destroy()
+        if not self._file_queue:
+            ctk.CTkLabel(self._playlist_scroll, text="（空）", text_color="gray50",
+                         anchor="w").grid(row=0, column=0, sticky="w", padx=6)
+            return
+        for i, path in enumerate(self._file_queue):
+            row_f = ctk.CTkFrame(self._playlist_scroll, fg_color="transparent")
+            row_f.grid(row=i, column=0, sticky="ew", pady=1)
+            row_f.grid_columnconfigure(0, weight=1)
+            name = os.path.basename(path)
+            lbl = ctk.CTkLabel(row_f, text=f"{i + 1}. {name}", anchor="w",
+                               font=ctk.CTkFont(size=11), cursor="hand2")
+            lbl.grid(row=0, column=0, sticky="w", padx=4)
+            lbl.bind("<Button-1>", lambda e, p=path: self._playlist_open(p))
+            row_f.bind("<Button-1>", lambda e, p=path: self._playlist_open(p))
+            ctk.CTkButton(row_f, text="×", width=22, height=20,
+                          fg_color="gray40", hover_color="gray20",
+                          command=lambda p=path: self._playlist_remove(p)).grid(
+                row=0, column=1, padx=(0, 2))
+
+    def _playlist_add(self) -> None:
+        paths = filedialog.askopenfilenames(
+            filetypes=[("テキスト/EPUB/PDF", "*.txt *.epub *.md *.pdf *.docx"), ("All", "*.*")],
+            title="プレイリストに追加",
+        )
+        for p in paths:
+            if p not in self._file_queue:
+                self._file_queue.append(p)
+        self._refresh_playlist_panel()
+
+    def _playlist_remove(self, path: str) -> None:
+        if path in self._file_queue:
+            self._file_queue.remove(path)
+        self._refresh_playlist_panel()
+
+    def _playlist_clear(self) -> None:
+        self._file_queue.clear()
+        self._refresh_playlist_panel()
+
+    def _playlist_open(self, path: str) -> None:
+        """プレイリストのアイテムをクリックしてテキストエリアに読み込む。"""
+        if not os.path.isfile(path):
+            self._set_status(f"ファイルが見つかりません: {os.path.basename(path)}", "error")
+            return
+        self._queue_full_text = None  # キューモード解除
+        self._set_status(f"読み込み中: {os.path.basename(path)}", "working")
+        def _load():
+            try:
+                text = _extract_text_from_file(path, ruby_to_kana=self.ruby_to_kana_var.get())
+            except Exception as exc:
+                self.after(0, lambda: self._set_status(f"読み込みエラー: {exc}", "error"))
+                return
+            def _apply():
+                self.textbox.delete("1.0", "end")
+                self.textbox.insert("1.0", text)
+                self._script = []
+                self._script_cache.clear()
+                self._char_dict_dirty = True
+                self._clear_all_highlights()
+                self._update_chunks()
+                self.time_slider.set(0)
+                self._update_time_label(0)
+                self._highlight_chunk(0)
+                self._set_status(f"読み込み完了: {os.path.basename(path)}", "ok")
+            self.after(0, _apply)
+        threading.Thread(target=_load, daemon=True).start()
+
+    def _parse_dnd_paths(self, data: str) -> list[str]:
+        """tkinterdnd2 のドロップデータをパスリストに変換。"""
+        paths = []
+        for m in re.finditer(r'\{([^}]+)\}|(\S+)', data):
+            p = (m.group(1) or m.group(2) or "").strip()
+            if p:
+                paths.append(p)
+        return paths
+
+    def _on_playlist_drop(self, event) -> None:
+        """プレイリストパネルへのD&D。"""
+        added = 0
+        for path in self._parse_dnd_paths(event.data):
+            if os.path.isfile(path) and path not in self._file_queue:
+                self._file_queue.append(path)
+                added += 1
+        self._refresh_playlist_panel()
+        if added:
+            self._set_status(f"プレイリストに {added} 件追加", "ok")
+
+    def _on_textbox_drop(self, event) -> None:
+        """テキストボックスへのD&D: 1件目を開く、複数ならそれ以降をプレイリストへ。"""
+        paths = self._parse_dnd_paths(event.data)
+        if not paths:
+            return
+        filepath = paths[0]
+        if not os.path.isfile(filepath):
+            return
+        try:
+            text = _extract_text_from_file(filepath, ruby_to_kana=self.ruby_to_kana_var.get())
+        except Exception as exc:
+            self._set_status(f"読み込みエラー: {exc}", "error")
+            return
+        self.textbox.delete("1.0", "end")
+        self.textbox.insert("1.0", text)
+        self._script = []
+        self._char_dict_dirty = True
+        self._clear_all_highlights()
+        self._update_chunks()
+        self.time_slider.set(0)
+        self._update_time_label(0)
+        self._highlight_chunk(0)
+        self._set_status(f"読み込み完了: {os.path.basename(filepath)}", "ok")
+        self._add_to_history(filepath)
+        # 2件目以降はプレイリストへ
+        if len(paths) > 1:
+            for p in paths[1:]:
+                if os.path.isfile(p) and p not in self._file_queue:
+                    self._file_queue.append(p)
+            self._refresh_playlist_panel()
 
     def _build_rule_based_tab(self, parent: ctk.CTkFrame) -> None:
         char_list = list(self._speaker_data.keys())
-        narrator_styles = list(
-            self._speaker_data.get(DEFAULT_NARRATOR_CHAR, {"ノーマル": 2}).keys())
-        dialogue_styles = list(
-            self._speaker_data.get(DEFAULT_DIALOGUE_CHAR, {"ノーマル": 3}).keys())
 
         init_narrator_char  = self._settings.get("narrator_char",  DEFAULT_NARRATOR_CHAR)
         init_narrator_style = self._settings.get(
@@ -1036,108 +1479,202 @@ class VoicevoxTTSApp(ctk.CTk):
             "dialogue_style",
             _best_style(self._speaker_data.get(DEFAULT_DIALOGUE_CHAR, {"ノーマル": 3})))
 
-        inner = ctk.CTkFrame(parent, fg_color="transparent")
-        inner.pack(padx=6, pady=(6, 6), anchor="w")
+        outer = ctk.CTkFrame(parent, fg_color="transparent")
+        outer.pack(padx=6, pady=(6, 6), fill="x")
 
-        ctk.CTkLabel(inner, text="地の文:", width=55, anchor="e").grid(
-            row=0, column=0, padx=(0, 4), pady=3, sticky="e")
-        self.narrator_char_var = ctk.StringVar(value=init_narrator_char)
-        self.narrator_char_menu = ctk.CTkOptionMenu(
-            inner, values=char_list, variable=self.narrator_char_var,
-            width=180, command=self._on_narrator_char_changed)
-        self.narrator_char_menu.grid(row=0, column=1, padx=(0, 6), pady=3)
+        def _make_rb_row(label_text, char_var, style_var, char_cmd, style_cmd,
+                         caption_var, reroll_key, eng_key):
+            """地の文/セリフ行を生成。エンジン切り替え付き。"""
+            eng_raw = self._category_engines.get(eng_key, "voicevox")
+            eng_disp = "Irodori" if eng_raw == "irodori" else "VOICEVOX"
 
-        ctk.CTkLabel(inner, text="スタイル:", width=60, anchor="e").grid(
-            row=0, column=2, padx=(0, 4), pady=3, sticky="e")
+            row = ctk.CTkFrame(outer, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+
+            ctk.CTkLabel(row, text=label_text, width=55, anchor="e").pack(
+                side="left", padx=(0, 4))
+
+            eng_var = ctk.StringVar(value=eng_disp)
+            eng_drop = ctk.CTkOptionMenu(row, values=["VOICEVOX", "Irodori"],
+                                         variable=eng_var, width=90)
+            eng_drop.pack(side="left", padx=(0, 4))
+
+            # VOICEVOX フレーム
+            vox_f = ctk.CTkFrame(row, fg_color="transparent")
+            char_menu = ctk.CTkOptionMenu(
+                vox_f, values=char_list, variable=char_var, width=160, command=char_cmd)
+            char_menu.pack(side="left", padx=(0, 4))
+            styles = list(self._speaker_data.get(char_var.get(), {"ノーマル": 0}).keys())
+            ctk.CTkLabel(vox_f, text="スタイル:", width=55, anchor="e").pack(
+                side="left", padx=(0, 2))
+            style_menu = ctk.CTkOptionMenu(
+                vox_f, values=styles, variable=style_var, width=130, command=style_cmd)
+            style_menu.pack(side="left")
+
+            # Irodori フレーム
+            iro_f = ctk.CTkFrame(row, fg_color="transparent")
+            ctk.CTkEntry(iro_f, textvariable=caption_var, width=260,
+                         placeholder_text="Irodori キャプション").pack(
+                side="left", padx=(0, 4))
+            ctk.CTkButton(iro_f, text="🎲", width=32,
+                          command=lambda k=reroll_key: self._reroll_voice(k)).pack(side="left")
+
+            def _switch(val, vf=vox_f, irf=iro_f, ek=eng_key):
+                if val == "Irodori":
+                    vf.pack_forget()
+                    irf.pack(side="left")
+                    self._set_category_engine(ek, "irodori")
+                else:
+                    irf.pack_forget()
+                    vf.pack(side="left")
+                    self._set_category_engine(ek, "voicevox")
+                self._update_rb_engine()
+
+            eng_drop.configure(command=_switch)
+
+            if eng_disp == "Irodori":
+                iro_f.pack(side="left")
+            else:
+                vox_f.pack(side="left")
+
+            return eng_var, char_menu, style_menu
+
+        # 地の文行
+        self.narrator_char_var  = ctk.StringVar(value=init_narrator_char)
         self.narrator_style_var = ctk.StringVar(value=init_narrator_style)
-        self.narrator_style_menu = ctk.CTkOptionMenu(
-            inner, values=narrator_styles, variable=self.narrator_style_var,
-            width=160, command=self._on_narrator_style_changed)
-        self.narrator_style_menu.grid(row=0, column=3, pady=3)
+        _rb_nar_eng_var, self.narrator_char_menu, self.narrator_style_menu = _make_rb_row(
+            "地の文:",
+            self.narrator_char_var, self.narrator_style_var,
+            self._on_narrator_char_changed, self._on_narrator_style_changed,
+            self.narrator_caption_var,
+            "__narrator__", "__narrator__",
+        )
 
-        ctk.CTkLabel(inner, text="セリフ:", width=55, anchor="e").grid(
-            row=1, column=0, padx=(0, 4), pady=3, sticky="e")
-        self.dialogue_char_var = ctk.StringVar(value=init_dialogue_char)
-        self.dialogue_char_menu = ctk.CTkOptionMenu(
-            inner, values=char_list, variable=self.dialogue_char_var,
-            width=180, command=self._on_dialogue_char_changed)
-        self.dialogue_char_menu.grid(row=1, column=1, padx=(0, 6), pady=3)
-
-        ctk.CTkLabel(inner, text="スタイル:", width=60, anchor="e").grid(
-            row=1, column=2, padx=(0, 4), pady=3, sticky="e")
+        # セリフ行（caption は caption_vars["主人公 女"] を流用 — MIXED_FALLBACK の routing 先と一致）
+        self.dialogue_char_var  = ctk.StringVar(value=init_dialogue_char)
         self.dialogue_style_var = ctk.StringVar(value=init_dialogue_style)
-        self.dialogue_style_menu = ctk.CTkOptionMenu(
-            inner, values=dialogue_styles, variable=self.dialogue_style_var,
-            width=160, command=self._on_dialogue_style_changed)
-        self.dialogue_style_menu.grid(row=1, column=3, pady=3)
+        _dlg_cap_var = self.caption_vars.get("主人公 女", ctk.StringVar(value=""))
+        _rb_dlg_eng_var, self.dialogue_char_menu, self.dialogue_style_menu = _make_rb_row(
+            "セリフ:",
+            self.dialogue_char_var, self.dialogue_style_var,
+            self._on_dialogue_char_changed, self._on_dialogue_style_changed,
+            _dlg_cap_var,
+            "主人公 女", "主人公 女",
+        )
 
-    def _build_llm_archetypes_tab(self, parent: ctk.CTkFrame) -> None:
-        inner_tabs = ctk.CTkTabview(parent)
-        inner_tabs.pack(fill="both", expand=True, padx=4, pady=4)
-        inner_tabs.add("配役リスト")
-        inner_tabs.add("キャラクター辞書")
+    def _build_haikyaku_tab(self, parent: ctk.CTkFrame) -> None:
+        header = ctk.CTkFrame(parent, fg_color="transparent")
+        header.pack(fill="x", padx=8, pady=(6, 2))
+        ctk.CTkCheckBox(header, text="声を固定", variable=self.use_ref_var,
+                        onvalue=True, offvalue=False,
+                        command=self._save_settings).pack(side="left")
+        self.extract_btn = ctk.CTkButton(header, text="📖 自動抽出", width=90,
+                                         command=self._start_extraction)
+        self.extract_btn.pack(side="left", padx=(12, 0))
+        ctk.CTkButton(header, text="🤖 AI配役", width=90,
+                      command=self._on_cast_button).pack(side="left", padx=(6, 0))
+        ctk.CTkLabel(header, text="一括:", width=35, anchor="e").pack(
+            side="left", padx=(16, 2))
+        ctk.CTkOptionMenu(
+            header, values=["VOICEVOX", "Irodori"],
+            width=90,
+            command=self._bulk_set_category_engine,
+        ).pack(side="left")
 
-        # ── 配役リスト タブ ──
-        cast_tab = inner_tabs.tab("配役リスト")
-        scroll = ctk.CTkScrollableFrame(cast_tab, height=180)
+        hint = ctk.CTkFrame(parent, fg_color="transparent")
+        hint.pack(fill="x", padx=10, pady=(0, 2))
+        ctk.CTkLabel(
+            hint,
+            text="💡 ①📖自動抽出（任意）→ ②🤖AI配役 → ③▶再生（キャラ毎に声が変わります）",
+            font=ctk.CTkFont(size=11),
+            text_color="gray60",
+            anchor="w",
+        ).pack(side="left")
+
+        inner = ctk.CTkTabview(parent, height=140)
+        inner.pack(fill="both", expand=True, padx=4, pady=(2, 4))
+        inner.add("役設定")
+        inner.add("キャラ辞書")
+
+        scroll = ctk.CTkScrollableFrame(inner.tab("役設定"), height=130)
         scroll.pack(fill="both", expand=True, padx=4, pady=4)
 
         char_list = list(self._speaker_data.keys())
         saved_archetypes: dict = self._settings.get("archetypes", {})
         self._archetype_menus = []
-        self.caption_vars: dict[str, ctk.StringVar] = {}
+        self._cat_eng_vars: dict[str, ctk.StringVar] = {}
+        self._cat_eng_switch_fns: dict[str, Any] = {}
 
-        for row_idx, archetype in enumerate(ARCHETYPES):
+        def _make_engine_switcher(vox_f, iro_f, archetype_key):
+            def _switch(val):
+                if val == "Irodori":
+                    vox_f.pack_forget()
+                    iro_f.pack(side="left")
+                    self._set_category_engine(archetype_key, "irodori")
+                else:
+                    iro_f.pack_forget()
+                    vox_f.pack(side="left")
+                    self._set_category_engine(archetype_key, "voicevox")
+            return _switch
+
+        for archetype in ARCHETYPES:
+            if archetype not in irodori_engine.DEFAULT_CAPTIONS:
+                continue
+
             saved = saved_archetypes.get(archetype, {})
             archetype_default = DEFAULT_ARCHETYPES.get(archetype, {})
             init_char  = saved.get("char",  archetype_default.get("char",  DEFAULT_NARRATOR_CHAR))
             init_style = saved.get("style", archetype_default.get("style", "ノーマル"))
+            cap_init = self._settings.get("captions", {}).get(
+                archetype, irodori_engine.DEFAULT_CAPTIONS.get(archetype, ""))
+            cat_eng_raw = self._category_engines.get(archetype, "voicevox")
+            eng_display = "Irodori" if cat_eng_raw == "irodori" else "VOICEVOX"
 
+            row_frame = ctk.CTkFrame(scroll, fg_color="transparent")
+            row_frame.pack(fill="x", pady=2)
+
+            ctk.CTkLabel(row_frame, text=f"{archetype}:", width=90, anchor="e").pack(
+                side="left", padx=(0, 4))
+
+            eng_var = ctk.StringVar(value=eng_display)
+            eng_dropdown = ctk.CTkOptionMenu(row_frame, values=["VOICEVOX", "Irodori"],
+                                             variable=eng_var, width=90)
+            eng_dropdown.pack(side="left", padx=(0, 4))
+
+            # VOICEVOX frame
             char_var  = ctk.StringVar(value=init_char)
             style_var = ctk.StringVar(value=init_style)
-
-            ctk.CTkLabel(scroll, text=f"{archetype}:", width=80, anchor="e").grid(
-                row=row_idx, column=0, padx=(0, 4), pady=2, sticky="e")
-
+            vox_frame = ctk.CTkFrame(row_frame, fg_color="transparent")
             char_menu = ctk.CTkOptionMenu(
-                scroll, values=char_list, variable=char_var, width=170,
-                command=lambda c, sv=style_var, sm_ref=[None]: (
-                    self._apply_char_change(c, sm_ref[0], sv) if sm_ref[0] else None
-                ))
-            char_menu.grid(row=row_idx, column=1, padx=(0, 6), pady=2)
-
-            style_styles = list(
-                self._speaker_data.get(init_char, {"ノーマル": 2}).keys())
+                vox_frame, values=char_list, variable=char_var, width=160)
+            char_menu.pack(side="left", padx=(0, 4))
+            style_styles = list(self._speaker_data.get(init_char, {"ノーマル": 2}).keys())
             style_menu = ctk.CTkOptionMenu(
-                scroll, values=style_styles, variable=style_var, width=130,
+                vox_frame, values=style_styles, variable=style_var, width=120,
                 command=lambda _: self._save_settings())
-            style_menu.grid(row=row_idx, column=2, pady=2)
-
+            style_menu.pack(side="left")
             char_menu.configure(
                 command=lambda c, sv=style_var, sm=style_menu: (
                     self._apply_char_change(c, sm, sv),
                     self._save_settings(),
                 ))
 
-            # Irodori 用キャプション欄（VOICEVOX話者選択と共存）。
-            # 「ナレーション」は下部の専用ナレーター欄に一本化するためスキップ。
-            if archetype in irodori_engine.DEFAULT_CAPTIONS:
-                cap_init = self._settings.get("captions", {}).get(
-                    archetype, irodori_engine.DEFAULT_CAPTIONS.get(archetype, ""))
-                cap_var = ctk.StringVar(value=cap_init)
-                ctk.CTkEntry(scroll, textvariable=cap_var, width=320,
-                             placeholder_text="Irodori キャプション").grid(
-                    row=row_idx, column=3, padx=(8, 0), pady=2, sticky="we")
-                self.caption_vars[archetype] = cap_var
-                ctk.CTkButton(scroll, text="🎲", width=32,
-                              command=lambda c=archetype: self._reroll_voice(c)).grid(
-                    row=row_idx, column=4, padx=(4, 0), pady=2)
-                _eng_var = ctk.StringVar(
-                    value=self._category_engines.get(archetype, "voicevox"))
-                ctk.CTkOptionMenu(
-                    scroll, values=["voicevox", "irodori"], variable=_eng_var, width=92,
-                    command=lambda v, c=archetype: self._set_category_engine(c, v)).grid(
-                    row=row_idx, column=5, padx=(4, 0), pady=2)
+            # Irodori frame
+            cap_var = self.caption_vars.get(archetype, ctk.StringVar(value=cap_init))
+            iro_frame = ctk.CTkFrame(row_frame, fg_color="transparent")
+            ctk.CTkEntry(iro_frame, textvariable=cap_var, width=280,
+                         placeholder_text="Irodori キャプション").pack(side="left", padx=(0, 4))
+            ctk.CTkButton(iro_frame, text="🎲", width=32,
+                          command=lambda c=archetype: self._reroll_voice(c)).pack(side="left")
+
+            _sw = _make_engine_switcher(vox_frame, iro_frame, archetype)
+            eng_dropdown.configure(command=_sw)
+            self._cat_eng_switch_fns[archetype] = _sw
+
+            if eng_display == "Irodori":
+                iro_frame.pack(side="left")
+            else:
+                vox_frame.pack(side="left")
 
             self.archetype_vars[archetype] = {
                 "char":       char_var,
@@ -1145,46 +1682,82 @@ class VoicevoxTTSApp(ctk.CTk):
                 "char_menu":  char_menu,
                 "style_menu": style_menu,
             }
+            self.caption_vars[archetype] = cap_var
+            self._cat_eng_vars[archetype] = eng_var
             self._archetype_menus.extend([char_menu, style_menu])
 
-        # ナレーター（地の文）用 Irodori キャプション
-        _nar_row = len(ARCHETYPES)
-        ctk.CTkLabel(scroll, text="ナレーター:", width=80, anchor="e").grid(
-            row=_nar_row, column=0, padx=(0, 4), pady=2, sticky="e")
-        self.narrator_caption_var = ctk.StringVar(
-            value=self._settings.get("narrator_caption", irodori_engine.DEFAULT_NARRATOR_CAPTION))
-        ctk.CTkEntry(scroll, textvariable=self.narrator_caption_var, width=320,
-                     placeholder_text="ナレーター キャプション").grid(
-            row=_nar_row, column=1, columnspan=3, padx=(0, 0), pady=2, sticky="we")
-        ctk.CTkButton(scroll, text="🎲", width=32,
-                      command=lambda: self._reroll_voice("__narrator__")).grid(
-            row=_nar_row, column=4, padx=(4, 0), pady=2)
-        _nar_eng_var = ctk.StringVar(
-            value=self._category_engines.get("__narrator__", "voicevox"))
-        ctk.CTkOptionMenu(
-            scroll, values=["voicevox", "irodori"], variable=_nar_eng_var, width=92,
-            command=lambda v: self._set_category_engine("__narrator__", v)).grid(
-            row=_nar_row, column=5, padx=(4, 0), pady=2)
+        # Narrator row
+        nar_cap_init = self._settings.get("narrator_caption", irodori_engine.DEFAULT_NARRATOR_CAPTION)
+        nar_eng_raw = self._category_engines.get("__narrator__", "voicevox")
+        nar_eng_display = "Irodori" if nar_eng_raw == "irodori" else "VOICEVOX"
 
-        # ── キャラクター辞書 タブ ──
-        dict_tab = inner_tabs.tab("キャラクター辞書")
+        nar_row = ctk.CTkFrame(scroll, fg_color="transparent")
+        nar_row.pack(fill="x", pady=2)
 
-        dict_header = ctk.CTkFrame(dict_tab, fg_color="transparent")
+        ctk.CTkLabel(nar_row, text="ナレーター:", width=90, anchor="e").pack(
+            side="left", padx=(0, 4))
+
+        nar_eng_var = ctk.StringVar(value=nar_eng_display)
+        nar_eng_dropdown = ctk.CTkOptionMenu(nar_row, values=["VOICEVOX", "Irodori"],
+                                              variable=nar_eng_var, width=90)
+        nar_eng_dropdown.pack(side="left", padx=(0, 4))
+
+        # Narrator VOICEVOX frame — reuse narrator_char_var / narrator_style_var from rule-based tab
+        nar_vox_frame = ctk.CTkFrame(nar_row, fg_color="transparent")
+        if not hasattr(self, "narrator_char_var"):
+            self.narrator_char_var = ctk.StringVar(value=DEFAULT_NARRATOR_CHAR)
+        if not hasattr(self, "narrator_style_var"):
+            self.narrator_style_var = ctk.StringVar(value="ノーマル")
+        nar_char_menu = ctk.CTkOptionMenu(
+            nar_vox_frame, values=char_list, variable=self.narrator_char_var, width=160,
+            command=self._on_narrator_char_changed)
+        nar_char_menu.pack(side="left", padx=(0, 4))
+        nar_style_list = list(self._speaker_data.get(self.narrator_char_var.get(), {"ノーマル": 2}).keys())
+        nar_style_menu = ctk.CTkOptionMenu(
+            nar_vox_frame, values=nar_style_list, variable=self.narrator_style_var, width=120,
+            command=self._on_narrator_style_changed)
+        nar_style_menu.pack(side="left")
+
+        # Narrator Irodori frame
+        if not hasattr(self, "narrator_caption_var"):
+            self.narrator_caption_var = ctk.StringVar(value=nar_cap_init)
+        nar_iro_frame = ctk.CTkFrame(nar_row, fg_color="transparent")
+        ctk.CTkEntry(nar_iro_frame, textvariable=self.narrator_caption_var, width=280,
+                     placeholder_text="ナレーター キャプション").pack(side="left", padx=(0, 4))
+        ctk.CTkButton(nar_iro_frame, text="🎲", width=32,
+                      command=lambda: self._reroll_voice("__narrator__")).pack(side="left")
+
+        def _nar_switch(val):
+            if val == "Irodori":
+                nar_vox_frame.pack_forget()
+                nar_iro_frame.pack(side="left")
+                self._set_category_engine("__narrator__", "irodori")
+            else:
+                nar_iro_frame.pack_forget()
+                nar_vox_frame.pack(side="left")
+                self._set_category_engine("__narrator__", "voicevox")
+
+        nar_eng_dropdown.configure(command=_nar_switch)
+        self._cat_eng_switch_fns["__narrator__"] = _nar_switch
+
+        if nar_eng_display == "Irodori":
+            nar_iro_frame.pack(side="left")
+        else:
+            nar_vox_frame.pack(side="left")
+
+        self._cat_eng_vars["__narrator__"] = nar_eng_var
+
+        self._build_char_dict_tab(inner.tab("キャラ辞書"))
+
+    def _build_char_dict_tab(self, parent: ctk.CTkFrame) -> None:
+        dict_header = ctk.CTkFrame(parent, fg_color="transparent")
         dict_header.pack(fill="x", padx=10, pady=(10, 4))
-
         ctk.CTkLabel(dict_header, text="キャラクター辞書 (固定配役):",
                      font=ctk.CTkFont(size=12, weight="bold")).pack(side="left")
+        ctk.CTkButton(dict_header, text="＋ 追加", width=65,
+                      command=lambda: self._add_char_row()).pack(side="right")
 
-        self.extract_btn = ctk.CTkButton(
-            dict_header, text="AIで自動抽出", width=110,
-            command=self._start_extraction)
-        self.extract_btn.pack(side="right", padx=(5, 0))
-
-        ctk.CTkButton(
-            dict_header, text="＋ 追加", width=65,
-            command=lambda: self._add_char_row()).pack(side="right")
-
-        header_frame = ctk.CTkFrame(dict_tab, fg_color="transparent")
+        header_frame = ctk.CTkFrame(parent, fg_color="transparent")
         header_frame.pack(fill="x", padx=15, pady=(5, 0))
         ctk.CTkLabel(header_frame, text="キャラ名 (編集可)",
                      font=ctk.CTkFont(size=12, weight="bold"), width=160, anchor="w").pack(side="left", padx=5)
@@ -1192,7 +1765,7 @@ class VoicevoxTTSApp(ctk.CTk):
                      font=ctk.CTkFont(size=12, weight="bold"), width=140, anchor="w").pack(side="left", padx=5)
 
         self.char_list_frame = ctk.CTkScrollableFrame(
-            dict_tab, height=200,
+            parent, height=200,
             fg_color=("gray95", "gray15"),
             border_width=1, border_color="gray70",
         )
@@ -1373,6 +1946,8 @@ class VoicevoxTTSApp(ctk.CTk):
         self.ollama_model_menu.grid(row=0, column=3, pady=3)
         ctk.CTkButton(inner, text="速度テスト", width=80,
                       command=self._benchmark_ollama).grid(row=0, column=4, padx=(6, 0), pady=3)
+        ctk.CTkButton(inner, text="🔍 LLM確認", width=80,
+                      command=self._check_ollama).grid(row=0, column=5, padx=(6, 0), pady=3)
 
         ctk.CTkLabel(inner, text="VOICEVOXポート:", width=110, anchor="e").grid(
             row=1, column=0, padx=(0, 4), pady=3, sticky="e")
@@ -2238,9 +2813,9 @@ class VoicevoxTTSApp(ctk.CTk):
         if DEBUG: print(f"\n[DEBUG] === Play Button Clicked ===")
         if DEBUG: print(f"[DEBUG] Current Tab Selected: '{current_tab}'")
 
-        if current_tab == "AIディレクター (15役)":
-            if DEBUG: print("[DEBUG] -> Triggering LLM Mode")
-            threading.Thread(target=self._llm_and_play_thread, daemon=True).start()
+        if current_tab == "配役":
+            if DEBUG: print("[DEBUG] -> Playing with cast script")
+            self._start_playback(start_index)
         else:
             if DEBUG: print("[DEBUG] -> Triggering Rule-based Mode")
             self._script = []
@@ -2647,12 +3222,17 @@ class VoicevoxTTSApp(ctk.CTk):
             _seeds = dict(self._caption_seeds)
             _global_engine = _engine  # "voicevox" / "irodori" / "mixed"
             _cat_engines = dict(self._category_engines)
-            # Irodori を1チャンクでも使うならバンドルを遅延起動（mixed 含む）
+            _LOG.info("PRODUCER_START engine=%s has_script=%s cat_engines=%s use_ref=%s",
+                      _global_engine, bool(self._script), _cat_engines, _use_ref)
+            # Irodori を1チャンクでも使うならバンドルを起動
             _needs_irodori = (_global_engine == "irodori"
                               or (_global_engine == "mixed"
                                   and any(v == "irodori" for v in _cat_engines.values())))
-            # Irodori 起動はUIを固めぬよう producer スレッドで実行
-            if _needs_irodori:
+            _irodori_ready = threading.Event()
+            _irodori_ok: list[bool] = [True]
+
+            if _global_engine == "irodori":
+                # Irodori 専用モード: 起動完了まで待機（VOICEVOX 音声が無いため）
                 try:
                     ok = self._irodori.ensure_running(
                         on_status=lambda m, k="working": self.after(
@@ -2668,6 +3248,26 @@ class VoicevoxTTSApp(ctk.CTk):
                         self._stop_event.set()
                     self._audio_queue.put(None)
                     return
+                _irodori_ready.set()
+            elif _needs_irodori:
+                # Mixed モード: Irodori 起動はバックグラウンドで。VOICEVOX チャンクは即開始。
+                def _bg_ensure():
+                    try:
+                        ok = self._irodori.ensure_running(
+                            on_status=lambda m, k="working": self.after(
+                                0, lambda mm=m, kk=k: self._set_status(mm, kk)))
+                        _irodori_ok[0] = ok
+                        if not ok:
+                            self.after(0, lambda: self._set_status(
+                                "Irodori 起動に失敗しました（VOICEVOX で代替）", "error"))
+                    except Exception as exc:
+                        _irodori_ok[0] = False
+                        self.after(0, lambda e=str(exc): self._set_status(e, "error"))
+                    finally:
+                        _irodori_ready.set()
+                threading.Thread(target=_bg_ensure, daemon=True).start()
+            else:
+                _irodori_ready.set()
 
             if self._script:
                 total = len(self._script)
@@ -2733,9 +3333,29 @@ class VoicevoxTTSApp(ctk.CTk):
                     # チャンクのカテゴリ → 使用エンジン（global=mixed のときカテゴリ別）
                     if self._script and chunk_idx < len(self._script):
                         cat = self._script[chunk_idx].get("category", "ナレーション")
+                    elif _global_engine == "mixed" and speaker_id != narrator_id:
+                        # LLM未キャスト時のセリフ: キャラ代表として "主人公 女" を使用
+                        cat = "主人公 女"
                     else:
                         cat = "ナレーション"
+                    # Mixed: script未配役または全部ナレーション判定の場合、
+                    # 「」で始まるチャンクはキャラ扱いにしてIrodoriへ振り分ける
+                    # (Stage-2 LLM配役がまだ追いついていないチャンクへのフォールバック)
+                    if (_global_engine == "mixed" and cat == "ナレーション"
+                            and chunk.startswith(self._valid_openers())):
+                        cat = "主人公 女"
+                        _LOG.debug("MIXED_FALLBACK #%d 「」検知→cat=主人公 女", chunk_idx)
                     _chunk_engine = irodori_engine.engine_for(cat, _global_engine, _cat_engines)
+                    _LOG.debug("CHUNK #%d spk=%s cat=%s engine=%s text=%.40r",
+                               chunk_idx, speaker_id, cat, _chunk_engine, chunk)
+                    if _chunk_engine == "irodori":
+                        # Irodori が起動完了するまで待機（Mixed ならここまでに VOICEVOX 再生済み）
+                        if not _irodori_ready.wait(timeout=120):
+                            _LOG.warning("IRODORI_TIMEOUT chunk=%d, fallback to voicevox", chunk_idx)
+                            _chunk_engine = "voicevox"
+                        elif not _irodori_ok[0]:
+                            _LOG.warning("IRODORI_NOT_OK chunk=%d, fallback to voicevox", chunk_idx)
+                            _chunk_engine = "voicevox"
                     if _chunk_engine == "irodori":
                         caption = irodori_engine.resolve_caption(
                             cat, _caption_map, _narr_caption)
@@ -2743,6 +3363,8 @@ class VoicevoxTTSApp(ctk.CTk):
                         self.after(0, lambda i=index, t=total: self._set_status(
                             f"Irodori 合成中... ({i}/{t})", "working"))
                         # カテゴリ毎seed＋use_ref（声固定）で同カテゴリの声を一貫させる
+                        _LOG.info("IRODORI_SYNTH #%d cat=%s caption=%.30r seed=%s use_ref=%s",
+                                  chunk_idx, cat, caption, seed, _use_ref)
                         wav_bytes = irodori_engine.synthesize_irodori(
                             self._http_session, self._irodori.base_url, chunk, caption,
                             seed=seed, use_ref=_use_ref)
