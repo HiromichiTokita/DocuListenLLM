@@ -25,7 +25,9 @@ settings.json
 archive/
 IrodoriTTS/
 DocuListen_開発経緯.pptx
-docs/superpowers/
+docs/
+handoff.md
+CLAUDE.md
 
 # ツール内部ファイル
 .claude/
