@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>DocuListen UI マニュアル</title>
+<style>
+  body { font-family: "Yu Gothic", "Meiryo", sans-serif; max-width: 960px; margin: 0 auto; padding: 20px; color: #222; }
+  h1 { color: #1a1a2e; border-bottom: 3px solid #1a73e8; padding-bottom: 8px; }
+  h2 { color: #1a73e8; border-left: 5px solid #1a73e8; padding-left: 12px; margin-top: 40px; }
+  h3 { color: #333; margin-top: 24px; }
+  .screenshot-wrap { position: relative; display: inline-block; margin: 16px 0; }
+  .screenshot-wrap img { max-width: 100%; border: 1px solid #ccc; border-radius: 4px; display: block; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+  th { background: #1a73e8; color: white; padding: 8px 12px; text-align: left; }
+  td { padding: 8px 12px; border: 1px solid #ddd; vertical-align: top; }
+  tr:nth-child(even) { background: #f5f8ff; }
+  .label { display: inline-block; background: #1a73e8; color: white; border-radius: 3px; padding: 1px 7px; font-size: 0.85em; margin-right: 4px; }
+  .label-green { background: #2e7d32; }
+  .label-orange { background: #e65100; }
+  .note { background: #fff8e1; border-left: 4px solid #f9a825; padding: 10px 14px; margin: 12px 0; border-radius: 2px; }
+  .section { background: #f5f8ff; border-radius: 8px; padding: 16px 20px; margin: 16px 0; }
+  @media print {
+    body { max-width: 100%; }
+    h2 { page-break-before: always; }
+    h2:first-of-type { page-break-before: avoid; }
+  }
+</style>
+</head>
+<body>
+
+<h1>DocuListen UI マニュアル</h1>
+<p>各画面の構成とボタン・機能の説明です。</p>
+
+<!-- ======================================================= -->
+<h2>1. 画面全体の構成</h2>
+
+<div class="screenshot-wrap">
+  <img src="../ルールベース画像.png" alt="ルールベース画面">
+</div>
+
+<table>
+  <tr><th>エリア</th><th>役割</th></tr>
+  <tr><td><strong>① トップバー</strong>（最上段）</td><td>ファイル操作・表示切替ボタン</td></tr>
+  <tr><td><strong>② テキストエリア</strong>（中央大）</td><td>読み込んだテキストを表示。再生中は現在読んでいる箇所が青くハイライトされる</td></tr>
+  <tr><td><strong>③ 再生コントロール</strong>（テキスト下）</td><td>再生・停止・速度・音量の操作</td></tr>
+  <tr><td><strong>④ 設定タブ</strong>（下段）</td><td>読み上げ声の設定（ルールベース／配役）</td></tr>
+  <tr><td><strong>⑤ プレイリスト</strong>（右側・任意表示）</td><td>複数ファイルの連続再生リスト</td></tr>
+  <tr><td><strong>⑥ 詳細設定</strong>（最下段）</td><td>エンジン・AIモデル・音声品質などの設定</td></tr>
+</table>
+
+<!-- ======================================================= -->
+<h2>2. トップバー</h2>
+
+<div class="section">
+<table>
+  <tr><th>ボタン</th><th>機能</th></tr>
+  <tr><td><span class="label">テキストを貼り付け</span></td><td>クリップボードのテキストをそのまま読み込む。コピーしたWeb小説などを即座に再生できる</td></tr>
+  <tr><td><span class="label">ファイル</span></td><td>TXT / EPUB / PDF / DOCX ファイルをダイアログから開く。ファイルをウィンドウにドラッグ＆ドロップしても開ける</td></tr>
+  <tr><td><span class="label">クリア</span></td><td>テキストエリアを空にする</td></tr>
+  <tr><td><span class="label">ルビ→かな</span>（チェック）</td><td>ONにすると、青空文庫形式のルビ（例: 薔薇《ばら》）を読み仮名に変換してから読み上げる</td></tr>
+  <tr><td><span class="label">ログ</span></td><td>デバッグ用のログウィンドウを表示する（開発・動作確認用）</td></tr>
+  <tr><td><span class="label">リスト</span></td><td>プレイリストパネルの表示／非表示を切り替える</td></tr>
+</table>
+</div>
+
+<!-- ======================================================= -->
+<h2>3. 再生コントロール</h2>
+
+<div class="section">
+<table>
+  <tr><th>操作</th><th>機能</th></tr>
+  <tr><td><strong>シークバー</strong>（横長スライダー）</td><td>再生位置を移動する。ドラッグして任意の箇所から再生できる</td></tr>
+  <tr><td><span class="label">◀◀</span>（先頭ボタン）</td><td>テキストの先頭（チャンク0）に戻る</td></tr>
+  <tr><td><span class="label">■</span>（停止ボタン）</td><td>再生を停止する</td></tr>
+  <tr><td><span class="label">▶</span>（再生ボタン）</td><td>再生を開始する。再生中に押すと一時停止／再開</td></tr>
+  <tr><td><strong>速度スライダー</strong></td><td>読み上げ速度を 0.5x〜3.0x で調整（タイムストレッチ方式のため音程は変わらない）</td></tr>
+  <tr><td><strong>余白スライダー</strong></td><td>チャンク（文節）間の無音時間を調整</td></tr>
+  <tr><td><strong>音量スライダー</strong></td><td>再生音量を調整</td></tr>
+  <tr><td><strong>位置表示</strong>（例: 3123 / 4695）</td><td>現在のチャンク番号 / 全チャンク数</td></tr>
+</table>
+</div>
+
+<!-- ======================================================= -->
+<h2>4. ルールベースタブ</h2>
+
+<div class="screenshot-wrap">
+  <img src="../ルールベース画像.png" alt="ルールベースタブ">
+</div>
+
+<p>「地の文（ナレーション）」と「セリフ（会話文）」をそれぞれ別の声で読み分ける、シンプルなモードです。AIは使いません。</p>
+
+<div class="section">
+<table>
+  <tr><th>設定項目</th><th>説明</th></tr>
+  <tr><td><strong>地の文</strong>（エンジン／キャラ／スタイル）</td><td>「」や『』で囲まれていない地の文（ナレーション）を読む声を設定する</td></tr>
+  <tr><td><strong>セリフ</strong>（エンジン／キャラ／スタイル）</td><td>「」や『』で囲まれた会話文を読む声を設定する</td></tr>
+</table>
+</div>
+
+<div class="note">
+  ▶ボタンを押すと、設定した2種類の声でそのまま再生を開始します。設定が最もシンプルで、すぐ使えます。
+</div>
+
+<!-- ======================================================= -->
+<h2>5. 配役タブ（AI自動配役）</h2>
+
+<div class="screenshot-wrap">
+  <img src="../配役画像.png" alt="配役タブ">
+</div>
+
+<p>ローカルAI（Ollama）がテキストを分析し、登場人物を自動的に役割分類して異なる声で読み分けるモードです。</p>
+
+<h3>操作の流れ</h3>
+
+<div class="section">
+<table>
+  <tr><th>ステップ</th><th>ボタン</th><th>何をするか</th></tr>
+  <tr><td>①</td><td><span class="label label-green">📖 自動抽出</span></td><td>テキストを解析し、登場するキャラクターを自動検出してキャラ辞書に追加する</td></tr>
+  <tr><td>②</td><td><span class="label label-green">🤖 AI配役</span></td><td>キャラ辞書をもとに各セリフを「主人公・悪役・語り手…」などに自動分類する（AIがバッチで処理。500セリフ約50秒）</td></tr>
+  <tr><td>③</td><td><span class="label label-green">▶</span></td><td>配役結果を使って再生を開始する</td></tr>
+</table>
+</div>
+
+<h3>その他のボタン</h3>
+
+<div class="section">
+<table>
+  <tr><th>項目</th><th>説明</th></tr>
+  <tr><td><span class="label">声を固定</span>（チェック）</td><td>ONにすると、同じテキストを再生するとき毎回同じ声順序で再生する（ランダム変動を防ぐ）</td></tr>
+  <tr><td>エンジン選択（▶横）</td><td>VOICEVOX / IrodoriTTS など、使用する音声エンジンを選ぶ</td></tr>
+</table>
+</div>
+
+<h3>キャラ辞書タブ</h3>
+
+<div class="section">
+<table>
+  <tr><th>列</th><th>説明</th></tr>
+  <tr><td><strong>アーキタイプ</strong>（例：主人公 女、悪役 男）</td><td>AIが分類するキャラクターの役割カテゴリ。15種類あり</td></tr>
+  <tr><td><strong>エンジン</strong></td><td>そのアーキタイプに使う音声エンジン（VOICEVOX等）</td></tr>
+  <tr><td><strong>キャラクター</strong></td><td>実際に声を当てるVOICEVOXのキャラクター名</td></tr>
+  <tr><td><strong>スタイル</strong></td><td>キャラクターの話し方（ノーマル・ささやき・感情等）</td></tr>
+</table>
+</div>
+
+<!-- ======================================================= -->
+<h2>6. プレイリスト</h2>
+
+<div class="section">
+<table>
+  <tr><th>操作</th><th>説明</th></tr>
+  <tr><td><span class="label">＋</span></td><td>ファイルをダイアログから追加する</td></tr>
+  <tr><td><span class="label">🗑</span></td><td>プレイリストを全消去する</td></tr>
+  <tr><td><strong>ファイル名をクリック</strong></td><td>そのファイルをテキストエリアに読み込む</td></tr>
+  <tr><td><span class="label">×</span>（各行右端）</td><td>そのファイルをリストから削除する</td></tr>
+  <tr><td><span class="label label-green">▶ 連続再生</span></td><td>リストの先頭から順番に自動で読み続ける</td></tr>
+  <tr><td><strong>ドラッグ＆ドロップ</strong></td><td>エクスプローラーからファイルをパネルにドロップして追加できる</td></tr>
+</table>
+<div class="note">プレイリストの内容はアプリ終了時に自動保存され、次回起動時に復元されます。</div>
+</div>
+
+<!-- ======================================================= -->
+<h2>7. 詳細設定（最下段）</h2>
+
+<div class="section">
+<table>
+  <tr><th>設定項目</th><th>説明</th></tr>
+  <tr><td><strong>CPU品質</strong></td><td>VOICEVOXの音声合成品質（Low / Medium / High）。Lowが最速、Highが最高品質（重い）</td></tr>
+  <tr><td><strong>Ollamaモデル</strong></td><td>AI配役に使用するLLMモデル名（例: llama3.2:latest）</td></tr>
+  <tr><td><span class="label">速度テスト</span></td><td>現在のOllamaモデルの処理速度を計測する</td></tr>
+  <tr><td><span class="label">LLM確認</span></td><td>Ollamaが起動しているか・指定モデルが存在するかをポップアップで確認する</td></tr>
+  <tr><td><strong>VOICEVOXポート</strong></td><td>VOICEVOXエンジンの接続ポート番号（通常 50021 のまま変更不要）</td></tr>
+  <tr><td><strong>数字の読み方</strong></td><td>「そのまま」「ひとつずつ」など数字の読み上げ方法を選択</td></tr>
+  <tr><td><strong>会話括弧</strong></td><td>セリフと判定する括弧の種類（「」『』など）を設定。これ以外の括弧は地の文として扱う</td></tr>
+</table>
+</div>
+
+<!-- ======================================================= -->
+<h2>8. 基本的な使い方（クイックスタート）</h2>
+
+<div class="section">
+<ol style="line-height:2;">
+  <li>アプリを起動する</li>
+  <li><strong>「ファイル」</strong>ボタンでテキストファイル（TXT / EPUB / PDFなど）を開く<br>　または、テキストをコピーして<strong>「テキストを貼り付け」</strong></li>
+  <li><strong>「ルールベース」タブ</strong>で地の文・セリフの声を選ぶ</li>
+  <li><strong>▶ボタン</strong>で再生開始</li>
+  <li>速度スライダーで好みの速度に調整する</li>
+</ol>
+</div>
+
+<div class="note">
+  <strong>AI配役を使う場合：</strong><br>
+  事前にOllamaを起動し「LLM確認」で動作確認 → 「📖自動抽出」→「🤖AI配役」→「▶」の順に操作してください。
+</div>
+
+<hr style="margin-top:40px;">
+<p style="color:#888; font-size:0.9em;">DocuListen v1.3.0 | 2026-06-29</p>
+
+</body>
+</html>
